@@ -14,16 +14,6 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
-/**
- * HyperOS 4 Rust-process bootstrap.
- *
- * Weather 18 is a native HyperOS package (android:hasCode=false) launched by
- * android.os.RustProcessImpl -> /system_ext/bin/hyos_spawner instead of the
- * normal ART app zygote. Therefore stock LSPosed cannot load an ordinary
- * package hook inside com.miui.weather2. The working public pattern used by
- * DPIS is to hook RustProcessImpl.startRustProcess in system_server and replace
- * the Rust binary with a proxy that tail-calls the original binary.
- */
 public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoadPackage {
     private static final String TARGET = "com.miui.weather2";
     private static final String MODULE = "io.github.pzhown.miweathlocation";
@@ -45,17 +35,12 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
         modulePath = startupParam == null || startupParam.modulePath == null
                 ? "" : startupParam.modulePath;
         XposedBridge.log("MiWeatherLocation RustProcess bootstrap init modulePath=" + modulePath);
-        // On some HyperOS builds RustProcessImpl is already visible here. If it
-        // is not, handleLoadPackage(system_server) below retries after framework
-        // classes are ready.
         installRustProcessHook("initZygote");
     }
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) {
-        if (lpparam == null || !isSystemServer(lpparam.packageName, lpparam.processName)) {
-            return;
-        }
+        if (lpparam == null || !isSystemServer(lpparam.packageName, lpparam.processName)) return;
         XposedBridge.log("MiWeatherLocation system_server entry package="
                 + lpparam.packageName + " process=" + lpparam.processName);
         installRustProcessHook("handleLoadPackage");
@@ -68,17 +53,13 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
     }
 
     private static void installRustProcessHook(String source) {
-        if (INSTALLED.get() || !INSTALLING.compareAndSet(false, true)) {
-            return;
-        }
+        if (INSTALLED.get() || !INSTALLING.compareAndSet(false, true)) return;
         try {
             Class<?> clazz = Class.forName(RUST_PROCESS_IMPL);
             int count = 0;
             for (Method method : clazz.getDeclaredMethods()) {
                 if (!START_RUST_PROCESS.equals(method.getName())
-                        || Modifier.isAbstract(method.getModifiers())) {
-                    continue;
-                }
+                        || Modifier.isAbstract(method.getModifiers())) continue;
                 XposedBridge.hookMethod(method, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
@@ -104,19 +85,17 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
         }
     }
 
-    private static void interceptRustStart(MethodHookParam param) {
+    private static void interceptRustStart(XC_MethodHook.MethodHookParam param) {
         try {
             Object[] args = param.args;
             if (args == null || args.length == 0) return;
-
             int packageIndex = findPackageIndex(args);
             if (packageIndex < 0) return;
 
             int binaryIndex = findBinaryIndex(args);
             if (binaryIndex < 0) {
                 String summary = summarizeStringArgs(args);
-                XposedBridge.log("MiWeatherLocation Weather Rust spawn seen but binary unresolved args="
-                        + summary);
+                XposedBridge.log("MiWeatherLocation Weather Rust spawn seen but binary unresolved args=" + summary);
                 sendStatus("WEATHER_SPAWN_BINARY_UNRESOLVED", summary);
                 return;
             }
@@ -138,7 +117,6 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
             String existingEnv = args[ARG_ENVIRONMENTS] instanceof String
                     ? (String) args[ARG_ENVIRONMENTS] : "";
             String updatedEnv = appendEnvironment(existingEnv, ENV_ORIGINAL, originalBinary);
-
             Object[] updated = Arrays.copyOf(args, args.length);
             updated[binaryIndex] = proxyBinary;
             updated[ARG_ENVIRONMENTS] = updatedEnv;
@@ -157,22 +135,14 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
     }
 
     private static int findPackageIndex(Object[] args) {
-        if (args.length > ARG_PACKAGE_NAME && TARGET.equals(args[ARG_PACKAGE_NAME])) {
-            return ARG_PACKAGE_NAME;
-        }
-        for (int i = 0; i < args.length; i++) {
-            if (TARGET.equals(args[i])) return i;
-        }
+        if (args.length > ARG_PACKAGE_NAME && TARGET.equals(args[ARG_PACKAGE_NAME])) return ARG_PACKAGE_NAME;
+        for (int i = 0; i < args.length; i++) if (TARGET.equals(args[i])) return i;
         return -1;
     }
 
     private static int findBinaryIndex(Object[] args) {
-        if (args.length > ARG_BINARY_PATH && isWeatherBinary(args[ARG_BINARY_PATH])) {
-            return ARG_BINARY_PATH;
-        }
-        for (int i = 0; i < args.length; i++) {
-            if (isWeatherBinary(args[i])) return i;
-        }
+        if (args.length > ARG_BINARY_PATH && isWeatherBinary(args[ARG_BINARY_PATH])) return ARG_BINARY_PATH;
+        for (int i = 0; i < args.length; i++) if (isWeatherBinary(args[i])) return i;
         return -1;
     }
 
@@ -191,23 +161,15 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
 
     private static String appendEnvironment(String existing, String key, String value) {
         StringBuilder builder = new StringBuilder();
-        if (existing != null && !existing.trim().isEmpty()) {
-            builder.append(existing.trim());
-        }
+        if (existing != null && !existing.trim().isEmpty()) builder.append(existing.trim());
         if (builder.length() > 0) builder.append(' ');
-        builder.append("--envs=")
-                .append(key)
-                .append('=')
-                .append(sanitizeEnvironmentValue(value));
+        builder.append("--envs=").append(key).append('=').append(sanitizeEnvironmentValue(value));
         return builder.toString();
     }
 
     private static String sanitizeEnvironmentValue(String value) {
         if (value == null) return "";
-        return value.replace(',', '_')
-                .replace('\n', '_')
-                .replace('\r', '_')
-                .replace(' ', '_');
+        return value.replace(',', '_').replace('\n', '_').replace('\r', '_').replace(' ', '_');
     }
 
     private static String summarizeStringArgs(Object[] args) {
@@ -242,7 +204,6 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
             intent.putExtra("timestamp", System.currentTimeMillis());
             context.sendBroadcast(intent);
         } catch (Throwable ignored) {
-            // XposedBridge.log remains the authoritative fallback diagnostic.
         }
     }
 }
