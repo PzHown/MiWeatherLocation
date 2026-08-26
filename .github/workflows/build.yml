@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: miweatherlocation-rustprocess-proxy-${{ github.ref }}
+  group: miweatherlocation-modern-rustprocess-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -39,19 +39,33 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      - name: Build debug APK with embedded HYOS proxy
+      - name: Build debug APK with HYOS sibling proxy
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Verify LSPosed system_server packaging
+      - name: Verify Modern API102 system_server packaging
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
-          unzip -p "$APK" assets/xposed_init | grep -qx 'io.github.pzhown.miweathlocation.LegacyEntry'
+          unzip -p "$APK" META-INF/xposed/java_init.list | grep -qx 'io.github.pzhown.miweathlocation.ModuleMain'
+          unzip -p "$APK" META-INF/xposed/module.prop | tee module.prop
+          grep -qx 'minApiVersion=102' module.prop
+          grep -qx 'targetApiVersion=102' module.prop
+          grep -qx 'staticScope=true' module.prop
+          unzip -p "$APK" META-INF/xposed/scope.list | tee scope.list
+          grep -qx 'system' scope.list
+          grep -qx 'com.miui.weather2' scope.list
+          if zipinfo -1 "$APK" | grep -qx 'assets/xposed_init'; then
+            echo "Legacy assets/xposed_init must not be present" >&2
+            exit 1
+          fi
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmiweatherlocation.so'
-          grep -q '<item>system</item>' app/src/main/res/values/xposed.xml
-          grep -q '<item>com.miui.weather2</item>' app/src/main/res/values/xposed.xml
           for DEX in $(zipinfo -1 "$APK" | grep -E '^classes([0-9]+)?\.dex$'); do
             unzip -p "$APK" "$DEX" | strings
-          done | grep -q 'android.os.RustProcessImpl'
+          done > dex-strings.txt
+          grep -q 'io/github/pzhown/miweathlocation/ModuleMain' dex-strings.txt
+          grep -q 'android.os.RustProcessImpl' dex-strings.txt
+          grep -q 'onSystemServerStarting' dex-strings.txt
+          grep -q 'WEATHER_PROXY_NOT_DEPLOYED' dex-strings.txt
+          grep -q 'WEATHER_RUST_SPAWN_INTERCEPTED' dex-strings.txt
 
       - name: Verify proxy symbols dependencies and 16 KB ELF alignment
         run: |
@@ -113,5 +127,5 @@ jobs:
             MiWeatherLocation-debug.apk \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "MiWeatherLocation HyperOS RustProcess proxy debug latest" \
-            --notes "Single-APK LSPosed build. Hooks android.os.RustProcessImpl.startRustProcess in system_server and redirects Xiaomi Weather 18 to the APK-embedded arm64 HYOS proxy, which loads the original Weather Rust binary. No separate MiWeatherLocation Magisk/Zygisk module."
+            --title "MiWeatherLocation Modern HyperOS RustProcess debug latest" \
+            --notes "Single APK. Modern libxposed API 102 loads in system_server and hooks android.os.RustProcessImpl.startRustProcess. The app can use root to deploy libmiweatherlocation.so as a sibling of Xiaomi Weather's libweather_app.so, matching the proven HyperOS Rust proxy pattern. No separate Magisk/Zygisk module."
