@@ -1,0 +1,6 @@
+id=miweatherlocation
+name=MiWeatherLocation Native
+version=0.2.0-native-alpha
+versionCode=200
+ author=PzHown
+description=Inject a custom favorite city into HyperOS Xiaomi Weather 18 native/Rust app without spoofing the real location.
