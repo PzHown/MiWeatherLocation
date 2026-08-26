@@ -16,7 +16,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="Xiaomi Weather 18 legacy bootstrap + embedded native payload" />
+            android:value="HyperOS 4 RustProcess system_server hook + embedded Weather native proxy" />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />
@@ -29,6 +29,7 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="io.github.pzhown.miweathlocation.LEGACY_BOOTSTRAP_LOADED" />
+                <action android:name="io.github.pzhown.miweathlocation.RUSTPROCESS_STATUS" />
             </intent-filter>
         </receiver>
 
