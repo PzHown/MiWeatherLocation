@@ -11,9 +11,9 @@ android {
     defaultConfig {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
-        targetSdk = 36
-        versionCode = 14
-        versionName = "0.4.2-modern-systemserver-alpha"
+        targetSdk = 37
+        versionCode = 15
+        versionName = "0.5.0-hyos-native-alpha"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -38,10 +38,11 @@ android {
     }
 
     packaging {
-        // The HYOS sibling-proxy deployment copies this library from the module's
-        // extracted nativeLibraryDir into Xiaomi Weather's native directory.
+        // Match working HyperOS 4 native-only LSPosed modules: keep the native
+        // payload as a normal APK JNI library and let LSPosed load it from the
+        // native_init declaration. No sibling copy/proxy deployment is needed.
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
         resources {
             merges += "META-INF/xposed/*"
