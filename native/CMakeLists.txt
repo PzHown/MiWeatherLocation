@@ -9,27 +9,20 @@ add_library(miweatherlocation SHARED
     src/main.cpp
 )
 
-add_library(miweatherlocation_hyos SHARED
-    src/zn_hyos_lifecycle_diag.cpp
+target_include_directories(miweatherlocation PRIVATE include)
+target_compile_options(miweatherlocation PRIVATE
+    -Wall
+    -Wextra
+    -Werror=return-type
+    -fvisibility=hidden
+    -fvisibility-inlines-hidden
 )
-
-foreach(target miweatherlocation miweatherlocation_hyos)
-    target_include_directories(${target} PRIVATE include)
-    target_compile_options(${target} PRIVATE
-        -Wall
-        -Wextra
-        -Werror=return-type
-        -fvisibility=hidden
-        -fvisibility-inlines-hidden
-    )
-    target_link_options(${target} PRIVATE
-        "-Wl,-z,max-page-size=16384"
-        "-Wl,-z,common-page-size=16384"
-    )
-endforeach()
+target_link_options(miweatherlocation PRIVATE
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+)
 
 find_library(log-lib log)
 find_library(dl-lib dl)
 
 target_link_libraries(miweatherlocation PRIVATE ${log-lib} ${dl-lib})
-target_link_libraries(miweatherlocation_hyos PRIVATE ${log-lib} ${dl-lib})
