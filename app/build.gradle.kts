@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.3-injection-probe"
+        versionCode = 5
+        versionName = "0.1.4-root-probe"
     }
 
     compileOptions {
