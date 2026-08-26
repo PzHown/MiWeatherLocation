@@ -20,10 +20,9 @@ public final class App extends Application implements XposedServiceHelper.OnServ
 
     @Override
     public void onServiceBind(XposedService xposedService) {
-        // Do not mutate scope here. HyperOS Rust apps are spawned by hyos_spawner,
-        // so the actual hook host is system_server (static scope entry "system").
-        // The previous diagnostic cleanup accidentally removed "system" and made
-        // RustProcessImpl.startRustProcess impossible to intercept.
+        // HYOS-capable LSPosed owns native injection into the scoped Weather
+        // child. Do not add system/system_server scope or a standalone Zygisk
+        // module: META-INF/xposed/native_init.list is the only native entry.
         service = xposedService;
     }
 
