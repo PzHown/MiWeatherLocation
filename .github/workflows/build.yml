@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: miweatherlocation-lsposed-legacy-${{ github.ref }}
+  group: miweatherlocation-rustprocess-proxy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -39,27 +39,21 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      - name: Build debug APK with embedded native payload
+      - name: Build debug APK with embedded HYOS proxy
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Verify legacy LSPosed bootstrap packaging
+      - name: Verify LSPosed system_server packaging
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           unzip -p "$APK" assets/xposed_init | grep -qx 'io.github.pzhown.miweathlocation.LegacyEntry'
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmiweatherlocation.so'
-          if zipinfo -1 "$APK" | grep -q '^META-INF/xposed/java_init.list$'; then
-            echo "Unexpected modern java_init.list remains; APK would be classified as a modern module" >&2
-            exit 1
-          fi
-          if zipinfo -1 "$APK" | grep -q '^META-INF/xposed/native_init.list$'; then
-            echo "Unexpected modern native_init.list remains" >&2
-            exit 1
-          fi
+          grep -q '<item>system</item>' app/src/main/res/values/xposed.xml
+          grep -q '<item>com.miui.weather2</item>' app/src/main/res/values/xposed.xml
           for DEX in $(zipinfo -1 "$APK" | grep -E '^classes([0-9]+)?\.dex$'); do
             unzip -p "$APK" "$DEX" | strings
-          done | grep -q 'Lio/github/pzhown/miweathlocation/LegacyEntry;'
+          done | grep -q 'android/os/RustProcessImpl'
 
-      - name: Verify native symbols and 16 KB ELF alignment
+      - name: Verify proxy symbols dependencies and 16 KB ELF alignment
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           unzip -p "$APK" lib/arm64-v8a/libmiweatherlocation.so > /tmp/libmiweatherlocation.so
@@ -70,8 +64,15 @@ jobs:
           "$NM" -D /tmp/libmiweatherlocation.so | tee native-symbols.txt
           grep -q ' JNI_OnLoad$' native-symbols.txt
           grep -q ' native_init$' native-symbols.txt
+          grep -q ' app_entry_point$' native-symbols.txt
+          grep -q ' hy_app_init$' native-symbols.txt
           if grep -q 'zygisk_module_entry' native-symbols.txt; then
             echo "Unexpected Zygisk entrypoint remains" >&2
+            exit 1
+          fi
+          "$READELF" -dW /tmp/libmiweatherlocation.so | tee elf-dynamic.txt
+          if grep -q 'libc++_shared.so' elf-dynamic.txt; then
+            echo "HYOS proxy unexpectedly depends on libc++_shared.so" >&2
             exit 1
           fi
           "$READELF" -lW /tmp/libmiweatherlocation.so | tee elf-program-headers.txt
@@ -112,5 +113,5 @@ jobs:
             MiWeatherLocation-debug.apk \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "MiWeatherLocation LSPosed legacy-bootstrap debug latest" \
-            --notes "Single-APK LSPosed legacy-bootstrap build for Xiaomi Weather 18 (android:hasCode=false). Embedded arm64 native payload is 16 KB ELF aligned. No MiWeatherLocation Magisk/Zygisk module is required."
+            --title "MiWeatherLocation HyperOS RustProcess proxy debug latest" \
+            --notes "Single-APK LSPosed build. Hooks android.os.RustProcessImpl.startRustProcess in system_server and redirects Xiaomi Weather 18 to the APK-embedded arm64 HYOS proxy, which loads the original Weather Rust binary. No separate MiWeatherLocation Magisk/Zygisk module."
