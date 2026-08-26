@@ -51,7 +51,7 @@ jobs:
           grep -q '<item>com.miui.weather2</item>' app/src/main/res/values/xposed.xml
           for DEX in $(zipinfo -1 "$APK" | grep -E '^classes([0-9]+)?\.dex$'); do
             unzip -p "$APK" "$DEX" | strings
-          done | grep -q 'android/os/RustProcessImpl'
+          done | grep -q 'android.os.RustProcessImpl'
 
       - name: Verify proxy symbols dependencies and 16 KB ELF alignment
         run: |
