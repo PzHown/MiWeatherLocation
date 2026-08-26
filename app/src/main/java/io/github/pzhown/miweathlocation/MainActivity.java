@@ -19,6 +19,8 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.util.List;
 
 import io.github.libxposed.service.XposedService;
@@ -28,6 +30,7 @@ public final class MainActivity extends Activity {
     private static final String SETTINGS = "com.android.settings";
 
     private TextView output;
+    private volatile String lastRootProbe = "Root injection probe: not run\n";
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     @Override
@@ -45,7 +48,7 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("对照测试：天气是目标，系统设置只作为无 Hook 的加载探针。\n如果设置能出现在 Running Targets 而天气不能，说明问题只在小米天气；如果两者都为 0，问题在 LSPosed/Zygote 注入链。");
+        hint.setText("天气是实际目标；系统设置只是无 Hook 的对照探针。Root 注入检查会读取天气进程 maps，判断 LSPosed/Zygisk native 层是否真的进入目标进程。");
         hint.setPadding(0, dp(8), 0, dp(12));
         root.addView(hint);
 
@@ -82,6 +85,11 @@ public final class MainActivity extends Activity {
         requestSettingsScope.setOnClickListener(v -> requestSettingsScope());
         root.addView(requestSettingsScope);
 
+        Button rootProbe = new Button(this);
+        rootProbe.setText("Root 注入检查");
+        rootProbe.setOnClickListener(v -> runRootInjectionProbe());
+        root.addView(rootProbe);
+
         output = new TextView(this);
         output.setTextIsSelectable(true);
         output.setTextSize(14f);
@@ -106,7 +114,7 @@ public final class MainActivity extends Activity {
 
     private void refreshDiagnostics() {
         StringBuilder sb = new StringBuilder();
-        sb.append("App version: 0.1.3-injection-probe\n");
+        sb.append("App version: 0.1.4-root-probe\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
         sb.append("Current userId: ").append(UserHandle.myUserId()).append('\n');
@@ -119,7 +127,8 @@ public final class MainActivity extends Activity {
         XposedService service = App.getService();
         if (service == null) {
             sb.append("Xposed Service: NOT CONNECTED\n");
-            sb.append("Conclusion: module app is not connected to LSPosed service.\n");
+            sb.append("Conclusion: module app is not connected to LSPosed service.\n\n");
+            sb.append(lastRootProbe);
             output.setText(sb.toString());
             return;
         }
@@ -156,11 +165,11 @@ public final class MainActivity extends Activity {
                         .anyMatch(t -> SETTINGS.equals(t.getProcessName()));
                 sb.append("Weather hooked target present: ").append(weatherRunning).append('\n');
                 sb.append("Settings probe hooked target present: ").append(settingsRunning).append('\n');
-                sb.append("\nConclusion: ");
+                sb.append("\nService conclusion: ");
                 if (settingsRunning && !weatherRunning) {
                     sb.append("LSPosed injection works; Xiaomi Weather is being skipped specifically.\n");
                 } else if (!settingsRunning && !weatherRunning) {
-                    sb.append("No scoped probe is injected; investigate LSPosed/Zygote/root backend rather than weather hooks.\n");
+                    sb.append("No scoped probe is loaded; inspect native injection/root backend.\n");
                 } else if (weatherRunning) {
                     sb.append("Weather module entry is loaded; continue with hook/SQLite diagnostics.\n");
                 } else {
@@ -177,6 +186,7 @@ public final class MainActivity extends Activity {
             }
         }
 
+        sb.append('\n').append(lastRootProbe);
         output.setText(sb.toString());
     }
 
@@ -231,6 +241,50 @@ public final class MainActivity extends Activity {
                     "作用域请求异常: " + t.getClass().getSimpleName() + ": " + t.getMessage(),
                     Toast.LENGTH_LONG).show();
         }
+    }
+
+    private void runRootInjectionProbe() {
+        Toast.makeText(this, "正在执行 root 注入检查", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            String script = "echo '=== root ==='; id; "
+                    + "echo '=== magisk ==='; magisk -V 2>/dev/null || true; "
+                    + "echo '=== related modules ==='; ls -1 /data/adb/modules 2>/dev/null | grep -Ei 'lsposed|lspd|zygisk|riru' || true; "
+                    + "echo '=== lspd processes ==='; ps -A 2>/dev/null | grep -Ei 'lspd|lsposed' || true; "
+                    + "PID=$(pidof com.miui.weather2 | awk '{print $1}'); echo weather_pid=$PID; "
+                    + "if [ -n \"$PID\" ]; then "
+                    + "echo '=== weather injected libraries ==='; "
+                    + "grep -Ei 'lsposed|lspd|lsplant|zygisk|libxposed' /proc/$PID/maps 2>/dev/null | head -n 100 || true; "
+                    + "fi";
+            StringBuilder result = new StringBuilder("Root injection probe:\n");
+            try {
+                java.lang.Process proc = Runtime.getRuntime().exec(new String[]{"su", "-c", script});
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(proc.getInputStream()));
+                     BufferedReader error = new BufferedReader(new InputStreamReader(proc.getErrorStream()))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        result.append(line).append('\n');
+                    }
+                    while ((line = error.readLine()) != null) {
+                        result.append("stderr: ").append(line).append('\n');
+                    }
+                }
+                int exit = proc.waitFor();
+                result.append("exitCode=").append(exit).append('\n');
+                if (result.indexOf("weather_pid=\n") >= 0) {
+                    result.append("Root conclusion: Xiaomi Weather is not running. Open it, then run this probe again.\n");
+                } else if (result.indexOf("=== weather injected libraries ===\nexitCode=") >= 0) {
+                    result.append("Root conclusion: weather is running but no LSPosed/Zygisk-related mapping was found; native injection is likely missing/skipped.\n");
+                } else {
+                    result.append("Root conclusion: related mappings were found; if Running Targets is still 0, investigate Modern Java entry loading/configuration.\n");
+                }
+            } catch (Throwable t) {
+                result.append("Root probe exception: ")
+                        .append(t.getClass().getName()).append(": ")
+                        .append(t.getMessage()).append('\n');
+            }
+            lastRootProbe = result.toString();
+            mainHandler.post(this::refreshDiagnostics);
+        }, "MiWeatherLocation-RootProbe").start();
     }
 
     private void copyDiagnostics() {
