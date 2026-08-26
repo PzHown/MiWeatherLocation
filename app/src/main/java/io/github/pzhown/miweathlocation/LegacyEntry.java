@@ -4,9 +4,9 @@ import android.app.Application;
 import android.content.Intent;
 
 import java.io.FileInputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 
-import de.robv.android.xposed.AndroidAppHelper;
 import de.robv.android.xposed.IXposedHookZygoteInit;
 import de.robv.android.xposed.XposedBridge;
 
@@ -41,11 +41,13 @@ public final class LegacyEntry implements IXposedHookZygoteInit {
 
         // Leave a rootless diagnostic marker in the module app. initZygote is
         // intentionally early, so wait until Android has created an Application
-        // object before sending the explicit broadcast.
+        // object before sending the explicit broadcast. Use reflection instead
+        // of AndroidAppHelper because the public legacy API compile artifact does
+        // not export that helper class.
         Thread marker = new Thread(() -> {
             for (int i = 0; i < 80; i++) {
                 try {
-                    Application app = AndroidAppHelper.currentApplication();
+                    Application app = currentApplication();
                     if (app != null) {
                         Intent intent = new Intent(ACTION);
                         intent.setPackage(MODULE);
@@ -70,6 +72,18 @@ public final class LegacyEntry implements IXposedHookZygoteInit {
         }, "MiWeatherLocation-LegacyMarker");
         marker.setDaemon(true);
         marker.start();
+    }
+
+    private static Application currentApplication() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Method method = activityThread.getDeclaredMethod("currentApplication");
+            method.setAccessible(true);
+            Object value = method.invoke(null);
+            return value instanceof Application ? (Application) value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static boolean isWeatherProcess(String process) {
