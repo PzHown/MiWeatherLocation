@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: miweatherlocation-lsposed-native-${{ github.ref }}
+  group: miweatherlocation-lsposed-legacy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -42,34 +42,57 @@ jobs:
       - name: Build debug APK with embedded native payload
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Verify modern Xposed Java and native entries
+      - name: Verify legacy LSPosed bootstrap packaging
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
-          echo "=== META-INF/xposed ==="
-          unzip -l "$APK" | grep 'META-INF/xposed/'
-          unzip -l "$APK" | grep -q 'META-INF/xposed/module.prop'
-          unzip -l "$APK" | grep -q 'META-INF/xposed/java_init.list'
-          unzip -l "$APK" | grep -q 'META-INF/xposed/native_init.list'
-          unzip -l "$APK" | grep -q 'META-INF/xposed/scope.list'
-          unzip -p "$APK" META-INF/xposed/native_init.list | grep -q '^libmiweatherlocation.so$'
+          unzip -p "$APK" assets/xposed_init | grep -qx 'io.github.pzhown.miweathlocation.LegacyEntry'
           unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmiweatherlocation.so'
+          if zipinfo -1 "$APK" | grep -q '^META-INF/xposed/java_init.list$'; then
+            echo "Unexpected modern java_init.list remains; APK would be classified as a modern module" >&2
+            exit 1
+          fi
+          if zipinfo -1 "$APK" | grep -q '^META-INF/xposed/native_init.list$'; then
+            echo "Unexpected modern native_init.list remains" >&2
+            exit 1
+          fi
           for DEX in $(zipinfo -1 "$APK" | grep -E '^classes([0-9]+)?\.dex$'); do
             unzip -p "$APK" "$DEX" | strings
-          done | grep -q 'Lio/github/pzhown/miweathlocation/ModuleMain;'
+          done | grep -q 'Lio/github/pzhown/miweathlocation/LegacyEntry;'
 
-      - name: Verify LSPosed native entrypoint
+      - name: Verify native symbols and 16 KB ELF alignment
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           unzip -p "$APK" lib/arm64-v8a/libmiweatherlocation.so > /tmp/libmiweatherlocation.so
           test -s /tmp/libmiweatherlocation.so
           NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           "$NM" -D /tmp/libmiweatherlocation.so | tee native-symbols.txt
-          grep -q ' native_init$' native-symbols.txt
           grep -q ' JNI_OnLoad$' native-symbols.txt
+          grep -q ' native_init$' native-symbols.txt
           if grep -q 'zygisk_module_entry' native-symbols.txt; then
             echo "Unexpected Zygisk entrypoint remains" >&2
             exit 1
           fi
+          "$READELF" -lW /tmp/libmiweatherlocation.so | tee elf-program-headers.txt
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path('elf-program-headers.txt').read_text()
+          aligns = []
+          for line in text.splitlines():
+              if re.match(r'^\s*LOAD\s', line):
+                  m = re.search(r'(0x[0-9a-fA-F]+)\s*$', line)
+                  if not m:
+                      raise SystemExit(f'Could not parse LOAD alignment: {line}')
+                  aligns.append(int(m.group(1), 16))
+          if not aligns:
+              raise SystemExit('No ELF LOAD segments found')
+          bad = [a for a in aligns if a < 0x4000]
+          print('ELF LOAD alignments:', [hex(a) for a in aligns])
+          if bad:
+              raise SystemExit(f'ELF LOAD segment alignment below 16 KB: {[hex(a) for a in bad]}')
+          PY
+          zipalign -c -P 16 -v 4 "$APK"
 
       - name: Prepare release asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -87,5 +110,5 @@ jobs:
             MiWeatherLocation-debug.apk \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "MiWeatherLocation LSPosed native debug latest" \
-            --notes "Pure LSPosed single-APK build for Xiaomi Weather 18. Native payload is embedded in the APK; no MiWeatherLocation Magisk/Zygisk module is required."
+            --title "MiWeatherLocation LSPosed legacy-bootstrap debug latest" \
+            --notes "Single-APK LSPosed legacy-bootstrap build for Xiaomi Weather 18 (android:hasCode=false). Embedded arm64 native payload is 16 KB ELF aligned. No MiWeatherLocation Magisk/Zygisk module is required."
