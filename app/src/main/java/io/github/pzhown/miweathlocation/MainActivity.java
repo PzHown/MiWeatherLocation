@@ -19,16 +19,16 @@ import android.widget.Toast;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 import io.github.libxposed.service.XposedService;
 
 public final class MainActivity extends Activity {
     private static final String WEATHER = "com.miui.weather2";
+    private static final String SYSTEM = "system";
     private static final int PER_USER_RANGE = 100000;
     private TextView output;
-    private volatile String rootProbeText = "Root LSPosed fork probe: not run\n";
+    private volatile String rootProbeText = "RustProcess runtime probe: not run\n";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -45,7 +45,7 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("当前只诊断 LSPosed 在 Zygisk fork 阶段为什么跳过小米天气。Native payload 仍内置，不需要另外刷 MiWeatherLocation Magisk 模块。");
+        hint.setText("HyperOS 4 Rust 方案：LSPosed 在 system_server Hook RustProcessImpl.startRustProcess，再让内置 native proxy 启动原始小米天气。仍然只有一个 APK，不需要 MiWeatherLocation Magisk 模块。首次升级后请确认 LSPosed 作用域包含“系统框架/system”。");
         hint.setPadding(0, dp(8), 0, dp(12));
         root.addView(hint);
 
@@ -64,8 +64,8 @@ public final class MainActivity extends Activity {
         root.addView(row);
 
         Button rootProbe = new Button(this);
-        rootProbe.setText("读取 LSPosed Root 日志");
-        rootProbe.setOnClickListener(v -> runRootForkProbe());
+        rootProbe.setText("读取 RustProcess 日志");
+        rootProbe.setOnClickListener(v -> runRuntimeProbe());
         root.addView(rootProbe);
 
         Button copy = new Button(this);
@@ -97,24 +97,22 @@ public final class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         int moduleUid = Process.myUid();
         int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: 0.3.2-lsposed-fork-probe\n");
-        sb.append("Architecture: pure LSPosed legacy bootstrap + embedded arm64 native payload\n");
-        sb.append("Modern java_init entry: false\n");
-        sb.append("Magisk module required: false\n");
-        sb.append("16 KB ELF alignment: enabled at link time\n");
+        sb.append("App version: 0.4.0-rustprocess-proxy-alpha\n");
+        sb.append("Architecture: LSPosed system_server RustProcess hook + embedded HYOS Weather proxy\n");
+        sb.append("Separate Magisk module required: false\n");
+        sb.append("16 KB ELF alignment: enabled\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
         sb.append("Current userId: ").append(userId).append('\n');
         sb.append("Module uid: ").append(moduleUid).append("\n\n");
 
         appendPackageInfo(sb, "Weather package", WEATHER);
-        appendLegacyMarker(sb);
+        appendRustStatus(sb);
         sb.append('\n');
 
         XposedService service = App.getService();
         if (service == null) {
             sb.append("Xposed Service: NOT CONNECTED\n");
-            sb.append("Note: the legacy bootstrap itself does not depend on the app-side service connection.\n");
         } else {
             try {
                 sb.append("Xposed Service: CONNECTED\n");
@@ -124,9 +122,11 @@ public final class MainActivity extends Activity {
                 sb.append("API: ").append(service.getApiVersion()).append('\n');
                 List<String> scope = service.getScope();
                 sb.append("Scope: ").append(scope).append('\n');
+                sb.append("Scope contains system: ").append(scope.contains(SYSTEM)).append('\n');
                 sb.append("Scope contains weather: ").append(scope.contains(WEATHER)).append('\n');
-                sb.append("Unexpected extra scopes: ").append(countExtraScopes(scope)).append('\n');
-
+                if (!scope.contains(SYSTEM)) {
+                    sb.append("ACTION REQUIRED: enable 系统框架/system scope; Weather itself is not the Rust hook host.\n");
+                }
                 if (service.getApiVersion() >= 102) {
                     var targets = service.getRunningTargets();
                     sb.append("Modern Running targets count: ").append(targets.size()).append('\n');
@@ -137,7 +137,7 @@ public final class MainActivity extends Activity {
                                 .append(" state=").append(target.getState())
                                 .append('\n');
                     }
-                    sb.append("Note: Running targets is not the success signal for this legacy build.\n");
+                    sb.append("Note: Weather is spawned by hyos_spawner, so Weather not appearing here is expected on stock LSPosed.\n");
                 }
             } catch (Throwable t) {
                 sb.append("LSPosed service diagnostic error: ")
@@ -150,39 +150,39 @@ public final class MainActivity extends Activity {
         output.setText(sb.toString());
     }
 
-    private void appendLegacyMarker(StringBuilder sb) {
+    private void appendRustStatus(StringBuilder sb) {
         SharedPreferences prefs = getSharedPreferences(HookStatusReceiver.PREFS, MODE_PRIVATE);
-        long timestamp = prefs.getLong(HookStatusReceiver.KEY_TIMESTAMP, 0L);
-        String process = prefs.getString(HookStatusReceiver.KEY_PROCESS, "");
-        if (timestamp <= 0L) {
-            sb.append("Legacy bootstrap marker: NOT RECEIVED\n");
+        String stage = prefs.getString(HookStatusReceiver.KEY_RUST_STAGE, "");
+        String detail = prefs.getString(HookStatusReceiver.KEY_RUST_DETAIL, "");
+        long timestamp = prefs.getLong(HookStatusReceiver.KEY_RUST_TIMESTAMP, 0L);
+        if (stage == null || stage.isEmpty() || timestamp <= 0L) {
+            sb.append("RustProcess status marker: NOT RECEIVED\n");
             return;
         }
         long ageMs = Math.max(0L, System.currentTimeMillis() - timestamp);
-        sb.append("Legacy bootstrap marker: RECEIVED")
-                .append(" process=").append(process)
-                .append(" ageMs=").append(ageMs)
-                .append('\n');
-    }
-
-    private int countExtraScopes(List<String> scope) {
-        int count = 0;
-        for (String packageName : scope) {
-            if (!WEATHER.equals(packageName)) count++;
+        sb.append("RustProcess status marker: ").append(stage)
+                .append(" ageMs=").append(ageMs).append('\n');
+        if (detail != null && !detail.isEmpty()) {
+            sb.append("RustProcess detail: ").append(detail).append('\n');
         }
-        return count;
     }
 
     private void appendPackageInfo(StringBuilder sb, String label, String packageName) {
         try {
-            ApplicationInfo info = getPackageManager().getApplicationInfo(packageName, 0);
+            ApplicationInfo info = getPackageManager().getApplicationInfo(packageName,
+                    android.content.pm.PackageManager.GET_META_DATA);
             sb.append(label).append(": installed=true")
                     .append(" uid=").append(info.uid)
                     .append(" process=").append(info.processName)
                     .append(" hasCode=").append((info.flags & ApplicationInfo.FLAG_HAS_CODE) != 0)
                     .append(" dataDir=").append(info.dataDir)
-                    .append(" enabled=").append(info.enabled)
-                    .append('\n');
+                    .append(" enabled=").append(info.enabled);
+            if (info.metaData != null) {
+                sb.append(" hyperos_package=").append(info.metaData.getBoolean("hyperos_package", false))
+                        .append(" rustLib=").append(info.metaData.getString("hyperos_app_lib_name", ""))
+                        .append(" rustEntry=").append(info.metaData.getString("hyperos_application_entry", ""));
+            }
+            sb.append('\n');
         } catch (Throwable t) {
             sb.append(label).append(": query-error=")
                     .append(t.getClass().getSimpleName()).append(':')
@@ -190,49 +190,40 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void runRootForkProbe() {
-        rootProbeText = "Root LSPosed fork probe: RUNNING...\n";
+    private void runRuntimeProbe() {
+        rootProbeText = "RustProcess runtime probe: RUNNING...\n";
         refreshDiagnostics();
-        Toast.makeText(this, "正在读取 LSPosed / Zygisk 日志", Toast.LENGTH_SHORT).show();
-
         new Thread(() -> {
             String result;
             try {
-                result = executeRootProbe();
+                result = executeRuntimeProbe();
             } catch (Throwable t) {
-                result = "Root LSPosed fork probe: ERROR " + t.getClass().getSimpleName()
-                        + ": " + t.getMessage() + "\n";
+                result = "RustProcess runtime probe: ERROR " + t + "\n";
             }
             rootProbeText = result;
             runOnUiThread(this::refreshDiagnostics);
-        }, "lsposed-fork-probe").start();
+        }, "rustprocess-runtime-probe").start();
     }
 
-    private String executeRootProbe() throws Exception {
+    private String executeRuntimeProbe() throws Exception {
         String script = """
-                echo '=== root identity ==='
-                id
-                echo '=== weather package/data ==='
-                cmd package path com.miui.weather2 2>&1
-                dumpsys package com.miui.weather2 2>/dev/null | grep -E 'dataDir=|credentialProtectedDataDir=|deviceProtectedDataDir=|processName=|flags=' | head -n 100
-                echo '=== weather processes ==='
+                echo '=== weather process ==='
                 ps -A 2>/dev/null | grep 'com.miui.weather2' || true
-                echo '=== Zygisk Next config ==='
-                if [ -f /data/adb/modules/zygisksu/module.prop ]; then grep -E '^(id|name|version|versionCode)=' /data/adb/modules/zygisksu/module.prop; fi
-                for f in /data/adb/zygisksu/denylist_enforce /data/adb/zygisksu/memory_type /data/adb/zygisksu/linker; do [ -f "$f" ] && echo "$(basename "$f")=$(cat "$f" 2>/dev/null)"; done
-                echo '=== Magisk Zygisk setting ==='
-                magisk --sqlite "SELECT key,value FROM settings WHERE key='zygisk';" 2>&1 || true
-                echo '=== LSPosed log directory ==='
-                ls -la /data/adb/lspd/log 2>&1 || true
-                echo '=== persistent LSPosed matches ==='
+                pid=$(ps -A 2>/dev/null | awk '$NF ~ /^com\\.miui\\.weather2(:|$)/ {print $2; exit}')
+                if [ -n "$pid" ]; then
+                  echo weather_pid=$pid
+                  printf 'weather_exe='; readlink /proc/$pid/exe 2>/dev/null || true
+                  echo '=== weather proxy/original maps ==='
+                  grep -E 'miweatherlocation|libweather_app.so|base.apk' /proc/$pid/maps 2>/dev/null | head -n 80 || true
+                fi
+                echo '=== MiWeatherLocation / RustProcess logs ==='
+                logcat -d -b all 2>/dev/null | grep -E 'MiWeatherLocation|MiWeatherLocationProxy|RustProcessImpl|hyos_spawner|rust fork' | tail -n 320
+                echo '=== LSPosed persistent matches ==='
                 for f in /data/adb/lspd/log/* /data/adb/lspd/log/*/*; do
                   [ -f "$f" ] || continue
-                  grep -aH -E 'com\\.miui\\.weather2|skip injecting|skipped|no data dir|child zygote|isolated|denylist' "$f" 2>/dev/null
-                done | tail -n 260
-                echo '=== current logcat matches ==='
-                logcat -d -b all 2>/dev/null | grep -E 'LSPosed|lspd|zygisk|Zygisk' | grep -E 'com\\.miui\\.weather2|weather2|skip injecting|skipped|no data dir|child zygote|isolated|denylist' | tail -n 260
+                  grep -aH -E 'MiWeatherLocation|RustProcessImpl|com\\.miui\\.weather2' "$f" 2>/dev/null
+                done | tail -n 220
                 """;
-
         java.lang.Process process = new ProcessBuilder("su", "-c", script)
                 .redirectErrorStream(true)
                 .start();
@@ -241,9 +232,7 @@ public final class MainActivity extends Activity {
             String line;
             while ((line = reader.readLine()) != null) {
                 raw.append(line).append('\n');
-                if (raw.length() > 24000) {
-                    raw.delete(0, raw.length() - 24000);
-                }
+                if (raw.length() > 30000) raw.delete(0, raw.length() - 30000);
             }
         }
         boolean exited = process.waitFor(12, TimeUnit.SECONDS);
@@ -253,37 +242,7 @@ public final class MainActivity extends Activity {
         } else {
             raw.append("exitCode=").append(process.exitValue()).append('\n');
         }
-
-        String body = raw.toString();
-        StringBuilder out = new StringBuilder();
-        out.append("Root LSPosed fork probe: COMPLETED\n");
-        out.append("Fork diagnosis: ").append(classifyRootProbe(body)).append('\n');
-        out.append(body);
-        return out.toString();
-    }
-
-    private String classifyRootProbe(String raw) {
-        String lower = raw.toLowerCase(Locale.ROOT);
-        boolean mentionsWeather = lower.contains("com.miui.weather2") || lower.contains("weather2");
-        if (mentionsWeather && lower.contains("because it has no data dir")) {
-            return "CONFIRMED_LSPOSED_SKIP_APP_DATA_DIR_NULL";
-        }
-        if (mentionsWeather && lower.contains("because it's a child zygote")) {
-            return "CONFIRMED_LSPOSED_SKIP_CHILD_ZYGOTE";
-        }
-        if (mentionsWeather && lower.contains("because it's isolated")) {
-            return "CONFIRMED_LSPOSED_SKIP_ISOLATED_UID";
-        }
-        if (mentionsWeather && lower.contains("injected xposed into")) {
-            return "LSPOSED_CORE_INJECTED_BUT_MODULE_BOOTSTRAP_MISSING";
-        }
-        if (mentionsWeather && lower.contains("skipped com.miui.weather2")) {
-            return "LSPOSED_CORE_SKIPPED_WEATHER_REASON_NOT_LOGGED";
-        }
-        if (lower.contains("uid=0(root)")) {
-            return "ROOT_OK_NO_DECISIVE_LSPOSED_FORK_LINE";
-        }
-        return "ROOT_UNAVAILABLE_OR_NO_OUTPUT";
+        return "RustProcess runtime probe: COMPLETED\n" + raw;
     }
 
     private void openWeather() {
