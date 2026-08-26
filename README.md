@@ -1,6 +1,6 @@
 # MiWeatherLocation
 
-面向小米天气 18 的 **纯 LSPosed 单 APK 模块**。当前版本使用 **legacy bootstrap + APK 内置 arm64 native payload**，不需要另外刷 MiWeatherLocation 的 Magisk / Zygisk 模块。
+面向小米天气 18 的 **纯 LSPosed 单 APK 模块**。当前主线直接采用已经在 HyperOS 4 native-only 应用上跑通的 `native_init` 模式：不 Hook `system_server`，不替换 Rust 启动参数，不复制 sibling proxy，也不需要另外刷 MiWeatherLocation 的 Magisk / Zygisk 模块。
 
 ## 当前目标
 
@@ -18,50 +18,58 @@
 - 已针对：小米天气 `18.0.0.18-R` / versionCode `180000180`
 - 广州塔坐标：`23.106428, 113.324521`
 - weather key：`weathercn:101280108`
-- 目标设备：arm64
+- 目标设备：arm64 / Android 17 / HyperOS 4
 
-## 为什么改成 legacy bootstrap
+## 为什么使用直接 HYOS native_init
 
 天气 18 是 HyperOS Native/Rust 架构：
 
 - `android:hasCode=false`
 - APK 内没有业务 DEX
+- 进程实际可执行文件：`/system_ext/bin/hyos_spawner`
 - 主 native 入口：`libweather_app.so`
 - Flutter AOT：`libapp.so`
 
-实机上，LSPosed 2.1.1 / API 102 可以正常把现代模块加载进 `com.android.settings:remote`，但同一个模块始终没有把小米天气列为 Running Target。为了绕开现代模块更晚的加载时点，MiWeatherLocation 改用 LSPosed 兼容的 legacy bootstrap 入口：
+项目对照了已运行于 HyperOS 4 native-only App 的开源 LSPosed 实现 `zilewang7/HyperOS4SmallWindowInputFilter`。其核心做法不是依赖 ART/Java package lifecycle，而是：
 
 ```text
-assets/xposed_init
-  -> LegacyEntry.initZygote()
-  -> System.loadLibrary("miweatherlocation")
-  -> JNI_OnLoad()
-  -> native worker
+scope.list -> 目标包
+java_init.list -> 仅保留空壳 XposedModule
+native_init.list -> 模块 native .so
+native_init() -> 在 hyos_spawner 子进程中检查 exe + cmdline
 ```
 
-这里的 `initZygote()` 是 legacy Xposed API 的生命周期名称；在 LSPosed 中模块仍然只按配置的作用域加载。模块不会把自己的 payload 做成 Magisk/Zygisk 模块。
-
-## Native payload
-
-APK 内包含：
+MiWeatherLocation 现在采用同一结构：
 
 ```text
+LSPosed scope: com.miui.weather2
+        ↓
+Weather HYOS child
+/proc/self/exe = /system_ext/bin/hyos_spawner
+/proc/self/cmdline = com.miui.weather2
+        ↓
+META-INF/xposed/native_init.list
+        ↓
+libmiweatherlocation.so::native_init()
+        ↓
+等待 libweather_app.so / SQLite / weather.db
+        ↓
+写入 selectedcity
+```
+
+`Modern Running Targets` 仅作为辅助信息，不再用于判断 native-only HYOS 注入是否成功。真正成功标志是天气进程 maps / `MiWeatherLocationNative` 日志中出现模块 native entry。
+
+## APK 结构
+
+```text
+META-INF/xposed/java_init.list
+META-INF/xposed/native_init.list
+META-INF/xposed/module.prop
+META-INF/xposed/scope.list
 lib/arm64-v8a/libmiweatherlocation.so
-assets/xposed_init
 ```
 
-native worker 只在 `com.miui.weather2` / `com.miui.weather2:*` 进程启动，等待 `libweather_app.so`、SQLite 和 `weather.db` 就绪，再处理 `selectedcity`。
-
-### 16 KB 页面兼容
-
-Android 17 实机曾提示 native library 的 ELF `LOAD` 段不满足 16 KB 对齐。NDK r27 构建现在显式使用：
-
-```text
--Wl,-z,max-page-size=16384
--Wl,-z,common-page-size=16384
-```
-
-CI 会读取 ELF Program Headers，要求所有 `LOAD` 段对齐值至少为 `0x4000`，并额外执行 `zipalign -P 16` 校验。
+`java_init.list` 的 `ModuleMain` 只用于 Modern libxposed 模块元数据兼容；实际逻辑全部在 `native_init`。
 
 ## 收藏城市写入
 
@@ -86,40 +94,69 @@ extra       = weathercn:101280108
 locale      = zh_cn
 ```
 
-写入前只移动 `flag=0 AND position>=1` 的收藏城市；不会更新 `flag=1` 的真实定位行。
+写入前只移动：
 
-## 安装与诊断
-
-1. 安装 Release 中的 `MiWeatherLocation-debug.apk`；
-2. 在 LSPosed 中启用 MiWeatherLocation；
-3. 作用域只保留“小米天气 / `com.miui.weather2`”；
-4. 强制停止并重新打开小米天气；
-5. 回到 MiWeatherLocation，点“刷新状态”。
-
-新版诊断使用 rootless marker：
-
-```text
-Legacy bootstrap marker: RECEIVED process=com.miui.weather2 ...
+```sql
+UPDATE selectedcity
+SET position = position + 1
+WHERE flag = 0 AND position >= 1;
 ```
 
-出现 `RECEIVED` 就说明 legacy bootstrap 已经实际进入天气进程，不再依赖 Modern Running Targets 判断。若仍为 `NOT RECEIVED`，问题位于 LSPosed/底层注入在进入模块代码之前的阶段。
+因此不会修改 `flag=1 / position=0` 的真实定位行。
 
-模块 App 连上 libxposed service 后还会自动清理之前诊断阶段残留的 `com.android.settings` scope；最终作用域只需要小米天气。
+## 安装与测试
 
-## 技术栈
+1. 安装 Release 中的 `MiWeatherLocation-debug.apk`；
+2. LSPosed 启用 MiWeatherLocation；
+3. 作用域只需要“小米天气 / `com.miui.weather2`”；
+4. 强制停止并重新打开小米天气；
+5. 打开 MiWeatherLocation，点“读取 HYOS Native 日志”。
 
-- LSPosed legacy Xposed API bootstrap (`api:82` compileOnly)
-- `assets/xposed_init`
-- APK 内置 arm64 native library
-- `JNI_OnLoad` native worker
-- 16 KB ELF LOAD alignment
-- libxposed service API 102（仅用于模块 App 侧状态/作用域诊断）
-- Xiaomi Weather SQLite `selectedcity`
+成功时应看到类似：
+
+```text
+native entry initialized in Weather HYOS child
+HYOS worker started exe=/system_ext/bin/hyos_spawner process=com.miui.weather2
+Weather native runtime ready ...
+favorite injection OK name=广州塔 flag=0 position=1; flag=1 current location untouched
+```
+
+模块功能本身不需要额外 root 操作。App 内的 root 只用于读取天气沙箱里的诊断日志，以及清理 0.4.x 曾经部署过的旧 sibling proxy；两者都不是运行依赖。
+
+## 0.4.x 迁移说明
+
+0.4.x 曾实验：
+
+```text
+system_server -> RustProcessImpl -> sibling proxy -> libweather_app.so
+```
+
+该路线已经废弃。0.5 起：
+
+- 删除 `system` scope；
+- 删除 `RustProcessImpl` Hook；
+- 删除 sibling proxy 转发；
+- 删除 RustProcess 广播状态链；
+- 不再把 native .so 复制进天气安装目录；
+- 直接由 LSPosed `native_init` 加载。
+
+如果设备上仍残留 0.4.x 的 `libmiweatherlocation.so` sibling 文件，可在模块 App 点“清理 0.4.x 旧 proxy（可选）”。
+
+## 16 KB 页面兼容
+
+native payload 显式使用：
+
+```text
+-Wl,-z,max-page-size=16384
+-Wl,-z,common-page-size=16384
+```
+
+CI 会同时检查 ELF `LOAD` 段、APK `zipalign -P 16`、`native_init` 导出、scope 仅包含天气，并确保旧的 `RustProcessImpl` / sibling proxy 入口没有重新混入构建。
 
 ## 后续计划
 
-- [ ] 实机确认 legacy bootstrap marker
-- [ ] 验证广州塔插入后是否被 Rust provider 内存状态覆盖
+- [ ] 实机确认 Weather HYOS `native_init` 日志
+- [ ] 确认广州塔插入后不会被 Rust provider 内存状态覆盖
 - [ ] 支持自定义地点
 - [ ] 接入小米 `/location/city/geo`
 - [ ] 支持广州塔、卡伦海滩等景区/街道级收藏
