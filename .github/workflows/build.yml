@@ -1,4 +1,4 @@
-name: Build APK + Zygisk
+name: Build APK
 
 on:
   push:
@@ -39,71 +39,45 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      - name: Fetch canonical Zygisk API header
-        run: |
-          mkdir -p native/include
-          curl -fsSL \
-            https://raw.githubusercontent.com/topjohnwu/zygisk-module-sample/master/module/jni/zygisk.hpp \
-            -o native/include/zygisk.hpp
-          grep -q '#define ZYGISK_API_VERSION' native/include/zygisk.hpp
-
-      - name: Build Zygisk arm64 native module
-        run: |
-          cmake -S native -B native/build -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-26 \
-            -DANDROID_STL=c++_static \
-            -DCMAKE_BUILD_TYPE=Release
-          cmake --build native/build --parallel
-
-      - name: Verify Zygisk native entrypoints
-        run: |
-          SO="native/build/libmiweatherlocation.so"
-          test -s "$SO"
-          NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
-          "$NM" -D "$SO" | tee native-symbols.txt
-          grep -q 'zygisk_module_entry' native-symbols.txt
-          grep -q 'zygisk_companion_entry' native-symbols.txt
-
-      - name: Package flashable Zygisk ZIP
-        run: |
-          rm -rf native/module-stage MiWeatherLocation-zygisk.zip
-          mkdir -p native/module-stage/zygisk
-          cp native/module/module.prop native/module-stage/
-          cp native/module/customize.sh native/module-stage/
-          cp native/module/config.properties native/module-stage/
-          cp native/build/libmiweatherlocation.so native/module-stage/zygisk/arm64-v8a.so
-          chmod 0755 native/module-stage/customize.sh
-          chmod 0644 native/module-stage/module.prop native/module-stage/config.properties
-          chmod 0644 native/module-stage/zygisk/arm64-v8a.so
-          (cd native/module-stage && zip -9 -r ../../MiWeatherLocation-zygisk.zip .)
-          unzip -l MiWeatherLocation-zygisk.zip
-          unzip -l MiWeatherLocation-zygisk.zip | grep -q 'zygisk/arm64-v8a.so'
-          unzip -p MiWeatherLocation-zygisk.zip module.prop | grep -q '^id=miweatherlocation$'
-
-      - name: Build debug APK
+      - name: Build debug APK with embedded native payload
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Verify modern Xposed compatibility metadata
+      - name: Verify modern Xposed Java and native entries
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           echo "=== META-INF/xposed ==="
           unzip -l "$APK" | grep 'META-INF/xposed/'
           unzip -l "$APK" | grep -q 'META-INF/xposed/module.prop'
           unzip -l "$APK" | grep -q 'META-INF/xposed/java_init.list'
+          unzip -l "$APK" | grep -q 'META-INF/xposed/native_init.list'
           unzip -l "$APK" | grep -q 'META-INF/xposed/scope.list'
+          unzip -p "$APK" META-INF/xposed/native_init.list | grep -q '^libmiweatherlocation.so$'
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmiweatherlocation.so'
           for DEX in $(zipinfo -1 "$APK" | grep -E '^classes([0-9]+)?\.dex$'); do
             unzip -p "$APK" "$DEX" | strings
           done | grep -q 'Lio/github/pzhown/miweathlocation/ModuleMain;'
 
-      - name: Prepare release assets
+      - name: Verify LSPosed native entrypoint
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          unzip -p "$APK" lib/arm64-v8a/libmiweatherlocation.so > /tmp/libmiweatherlocation.so
+          test -s /tmp/libmiweatherlocation.so
+          NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          "$NM" -D /tmp/libmiweatherlocation.so | tee native-symbols.txt
+          grep -q ' native_init$' native-symbols.txt
+          grep -q ' JNI_OnLoad$' native-symbols.txt
+          if grep -q 'zygisk_module_entry' native-symbols.txt; then
+            echo "Unexpected Zygisk entrypoint remains" >&2
+            exit 1
+          fi
+
+      - name: Prepare release asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk MiWeatherLocation-debug.apk
-          sha256sum MiWeatherLocation-debug.apk MiWeatherLocation-zygisk.zip
+          sha256sum MiWeatherLocation-debug.apk
 
-      - name: Publish APK and Zygisk ZIP to debug-latest
+      - name: Publish APK to debug-latest
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -111,8 +85,7 @@ jobs:
           gh release delete debug-latest --yes --cleanup-tag || true
           gh release create debug-latest \
             MiWeatherLocation-debug.apk \
-            MiWeatherLocation-zygisk.zip \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "MiWeatherLocation native debug latest" \
-            --notes "Weather 18 native/Rust alpha. Install the APK for configuration/logs and flash the Zygisk ZIP for process injection. Real location is not spoofed."
+            --title "MiWeatherLocation LSPosed native debug latest" \
+            --notes "Pure LSPosed single-APK build for Xiaomi Weather 18. Native payload is embedded in the APK; no MiWeatherLocation Magisk/Zygisk module is required."
