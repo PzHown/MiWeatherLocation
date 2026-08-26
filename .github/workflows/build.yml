@@ -66,6 +66,7 @@ jobs:
           test -s /tmp/libmiweatherlocation.so
           NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          ZIPALIGN="$ANDROID_HOME/build-tools/37.0.0/zipalign"
           "$NM" -D /tmp/libmiweatherlocation.so | tee native-symbols.txt
           grep -q ' JNI_OnLoad$' native-symbols.txt
           grep -q ' native_init$' native-symbols.txt
@@ -92,7 +93,8 @@ jobs:
           if bad:
               raise SystemExit(f'ELF LOAD segment alignment below 16 KB: {[hex(a) for a in bad]}')
           PY
-          zipalign -c -P 16 -v 4 "$APK"
+          test -x "$ZIPALIGN"
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK"
 
       - name: Prepare release asset
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
