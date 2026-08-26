@@ -10,8 +10,6 @@ add_library(miweatherlocation SHARED src/main.cpp)
 target_include_directories(miweatherlocation PRIVATE include)
 
 target_compile_options(miweatherlocation PRIVATE
-    "SHELL:-include sys/types.h"
-    "SHELL:-include errno.h"
     -Wall
     -Wextra
     -Werror=return-type
