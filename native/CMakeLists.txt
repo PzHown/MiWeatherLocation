@@ -10,7 +10,7 @@ add_library(miweatherlocation SHARED
 )
 
 add_library(miweatherlocation_hyos SHARED
-    src/zn_hyos_probe.cpp
+    src/zn_hyos_lifecycle_diag.cpp
 )
 
 foreach(target miweatherlocation miweatherlocation_hyos)
