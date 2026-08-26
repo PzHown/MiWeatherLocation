@@ -125,7 +125,8 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
             String detail = "packageIndex=" + packageIndex
                     + " binaryIndex=" + binaryIndex
                     + " original=" + originalBinary
-                    + " proxy=" + proxyBinary;
+                    + " proxy=" + proxyBinary
+                    + " env=" + updatedEnv;
             XposedBridge.log("MiWeatherLocation Weather Rust spawn intercepted " + detail);
             sendStatus("WEATHER_RUST_SPAWN_INTERCEPTED", detail);
         } catch (Throwable t) {
@@ -159,11 +160,22 @@ public final class LegacyEntry implements IXposedHookZygoteInit, IXposedHookLoad
         return path + "!/lib/arm64-v8a/" + PROXY_LIBRARY;
     }
 
+    // Match the argument shape used by HyperOS RustProcess implementations and
+    // the working DPIS Weather/Gallery hook: preserve the existing string,
+    // separate another environment with " --envs=", and keep the cold-boot flag.
     private static String appendEnvironment(String existing, String key, String value) {
         StringBuilder builder = new StringBuilder();
-        if (existing != null && !existing.trim().isEmpty()) builder.append(existing.trim());
-        if (builder.length() > 0) builder.append(' ');
-        builder.append("--envs=").append(key).append('=').append(sanitizeEnvironmentValue(value));
+        if (existing != null && !existing.trim().isEmpty()) {
+            builder.append(existing.trim());
+            if (builder.charAt(builder.length() - 1) != ',') {
+                builder.append(',');
+            }
+        }
+        if (builder.length() > 0) {
+            builder.append(" --envs=");
+        }
+        builder.append(key).append('=').append(sanitizeEnvironmentValue(value));
+        builder.append(" --cold-boot-speed");
         return builder.toString();
     }
 
