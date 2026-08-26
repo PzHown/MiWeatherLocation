@@ -17,6 +17,15 @@ target_compile_options(miweatherlocation PRIVATE
     -fvisibility-inlines-hidden
 )
 
+# Android 15+ devices may use 16 KB memory pages. NDK r27 and lower do
+# not align ELF LOAD segments to 16 KB automatically, so make the
+# requirement explicit. This removes Android 17's compatibility warning
+# and keeps the embedded native payload loadable on 16 KB page devices.
+target_link_options(miweatherlocation PRIVATE
+    "-Wl,-z,max-page-size=16384"
+    "-Wl,-z,common-page-size=16384"
+)
+
 find_library(log-lib log)
 find_library(dl-lib dl)
 
