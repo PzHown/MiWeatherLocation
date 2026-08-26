@@ -13,6 +13,10 @@ namespace {
 
 constexpr const char* kTag = "MiWeatherLocationProxy";
 constexpr const char* kOriginalEnv = "MIWEATHERLOCATION_ORIGINAL_BINARY";
+constexpr const char* kOriginalName = "libweather_app.so";
+constexpr const char* kHyperOsAppPublicLibrary = "libhyper_os_app_public.so";
+
+using HyperOsLaunchMainThread = void (*)();
 
 std::mutex gLoadMutex;
 void* gOriginalHandle = nullptr;
@@ -22,20 +26,48 @@ void logLine(int priority, const char* text) {
     __android_log_print(priority, kTag, "%s", text == nullptr ? "" : text);
 }
 
+std::string siblingOriginalWeatherPath() {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&siblingOriginalWeatherPath), &info) == 0
+            || info.dli_fname == nullptr
+            || info.dli_fname[0] == '\0') {
+        return {};
+    }
+    std::string selfPath(info.dli_fname);
+    size_t slash = selfPath.find_last_of('/');
+    if (slash == std::string::npos) return {};
+    return selfPath.substr(0, slash + 1) + kOriginalName;
+}
+
+std::string resolveOriginalWeatherPath() {
+    const char* envPath = std::getenv(kOriginalEnv);
+    if (envPath != nullptr && envPath[0] != '\0') {
+        return envPath;
+    }
+    std::string fallback = siblingOriginalWeatherPath();
+    if (!fallback.empty()) {
+        std::string message = "original binary env missing; using sibling fallback: " + fallback;
+        logLine(ANDROID_LOG_WARN, message.c_str());
+    }
+    return fallback;
+}
+
 void* loadOriginalWeatherBinary() {
     std::lock_guard<std::mutex> lock(gLoadMutex);
     if (gOriginalHandle != nullptr) return gOriginalHandle;
 
-    const char* path = std::getenv(kOriginalEnv);
-    if (path == nullptr || path[0] == '\0') {
-        logLine(ANDROID_LOG_ERROR, "proxy entered but original binary env is missing");
+    std::string path = resolveOriginalWeatherPath();
+    if (path.empty()) {
+        logLine(ANDROID_LOG_ERROR, "proxy entered but original Weather binary path is unresolved");
         return nullptr;
     }
 
-    std::string message = std::string("loading original Weather binary: ") + path;
+    std::string message = "loading original Weather binary: " + path;
     logLine(ANDROID_LOG_INFO, message.c_str());
     dlerror();
-    gOriginalHandle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    // DPIS' proven HyperOS Rust proxy uses RTLD_GLOBAL. Some HyperOS native
+    // components expect symbols from the original app library to be globally visible.
+    gOriginalHandle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (gOriginalHandle == nullptr) {
         const char* error = dlerror();
         std::string failure = std::string("dlopen original Weather binary failed: ")
@@ -44,7 +76,7 @@ void* loadOriginalWeatherBinary() {
         return nullptr;
     }
 
-    logLine(ANDROID_LOG_INFO, "original Weather binary loaded");
+    logLine(ANDROID_LOG_INFO, "original Weather binary loaded with RTLD_GLOBAL");
     return gOriginalHandle;
 }
 
@@ -53,6 +85,8 @@ extern "C" jint JNI_OnLoad(JavaVM*, void*);
 void triggerDatabaseWorker() {
     bool expected = false;
     if (!gWorkerTriggered.compare_exchange_strong(expected, true)) return;
+    // main.cpp's JNI_OnLoad does not dereference the VM pointer; it is also our
+    // process-local bootstrap for the database worker.
     JNI_OnLoad(nullptr, nullptr);
 }
 
@@ -137,3 +171,29 @@ void hy_app_init() {
     if (entry != nullptr) entry();
 }
 #endif
+
+// HyperOS Rust proxy implementations in the wild also forward this helper from
+// libhyper_os_app_public.so. Exporting it keeps the sibling proxy compatible with
+// spawner/runtime paths that resolve launch_main_thread from the selected binary.
+extern "C" [[gnu::visibility("default")]] [[gnu::used]]
+void launch_main_thread() {
+    dlerror();
+    void* handle = dlopen(kHyperOsAppPublicLibrary, RTLD_NOW | RTLD_GLOBAL);
+    if (handle == nullptr) {
+        handle = dlopen("/system_ext/lib64/libhyper_os_app_public.so", RTLD_NOW | RTLD_GLOBAL);
+    }
+    const char* openError = dlerror();
+    HyperOsLaunchMainThread original = nullptr;
+    if (handle != nullptr) {
+        dlerror();
+        original = reinterpret_cast<HyperOsLaunchMainThread>(dlsym(handle, "launch_main_thread"));
+    }
+    const char* symbolError = dlerror();
+    std::string message = "forward launch_main_thread handle="
+            + std::to_string(reinterpret_cast<uintptr_t>(handle))
+            + " original=" + std::to_string(reinterpret_cast<uintptr_t>(original))
+            + " openError=" + (openError == nullptr ? "" : openError)
+            + " symbolError=" + (symbolError == nullptr ? "" : symbolError);
+    logLine(original == nullptr ? ANDROID_LOG_ERROR : ANDROID_LOG_INFO, message.c_str());
+    if (original != nullptr) original();
+}
