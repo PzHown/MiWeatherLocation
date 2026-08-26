@@ -235,10 +235,11 @@ public final class MainActivity extends Activity {
                 result = "Proxy deployment: ERROR " + t + "\n";
             }
             operationText = result;
+            final String deployResult = result;
             runOnUiThread(() -> {
                 refreshDiagnostics();
                 Toast.makeText(this,
-                        result.contains("DEPLOY_OK") ? "Rust proxy 已部署，请重启手机" : "Rust proxy 部署失败，请复制诊断",
+                        deployResult.contains("DEPLOY_OK") ? "Rust proxy 已部署，请重启手机" : "Rust proxy 部署失败，请复制诊断",
                         Toast.LENGTH_LONG).show();
             });
         }, "proxy-deploy").start();
@@ -284,8 +285,9 @@ public final class MainActivity extends Activity {
         java.lang.Process process = new ProcessBuilder("su", "-c", script)
                 .redirectErrorStream(true)
                 .start();
-        String output = readProcessOutput(process, 15);
-        return "Proxy deployment: " + (process.exitValue() == 0 ? "COMPLETED\n" : "FAILED\n") + output;
+        String commandOutput = readProcessOutput(process, 15);
+        boolean success = commandOutput.contains("DEPLOY_OK");
+        return "Proxy deployment: " + (success ? "COMPLETED\n" : "FAILED\n") + commandOutput;
     }
 
     private void runRuntimeProbe() {
