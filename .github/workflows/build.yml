@@ -1,13 +1,13 @@
-name: Build APK and ZN HYOS Probe
+name: Build LSPosed HYOS APK
 
 on:
   push:
-    branches: [ main, 'feat/zn-hyos-runtime' ]
+    branches: [ main, 'feat/lsposed-hyos-native' ]
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: miweatherlocation-${{ github.ref }}
@@ -39,23 +39,30 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      - name: Build APK and native libraries
+      - name: Build APK
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Verify Zygisk Next HYOS probe
+      - name: Verify LSPosed HYOS native APK
         run: |
-          SO="app/build/intermediates/cxx/Debug"
-          HYOS_SO=$(find "$SO" -type f -name 'libmiweatherlocation_hyos.so' | head -n 1)
-          test -n "$HYOS_SO" && test -s "$HYOS_SO"
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          unzip -l "$APK" | tee apk-files.txt
+          grep -q 'META-INF/xposed/native_init.list' apk-files.txt
+          grep -q 'META-INF/xposed/scope.list' apk-files.txt
+          grep -q 'lib/arm64-v8a/libmiweatherlocation.so' apk-files.txt
+          unzip -p "$APK" META-INF/xposed/native_init.list | grep -qx 'libmiweatherlocation.so'
+          unzip -p "$APK" META-INF/xposed/scope.list | grep -qx 'com.miui.weather2'
+          SO=$(find app/build/intermediates/cxx/Debug -type f -name 'libmiweatherlocation.so' | head -n 1)
+          test -n "$SO" && test -s "$SO"
           NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          "$NM" -D "$HYOS_SO" | tee zn-symbols.txt
-          grep -q ' zn_module$' zn-symbols.txt
-          "$READELF" -lW "$HYOS_SO" > zn-elf-program-headers.txt
+          "$NM" -D "$SO" | tee native-symbols.txt
+          grep -q ' native_init$' native-symbols.txt
+          "$READELF" -lW "$SO" > native-elf-program-headers.txt
           python3 - <<'PY'
           import re
           from pathlib import Path
-          text = Path('zn-elf-program-headers.txt').read_text()
+          text = Path('native-elf-program-headers.txt').read_text()
           aligns = []
           for line in text.splitlines():
               if re.match(r'^\s*LOAD\s', line):
@@ -65,27 +72,9 @@ jobs:
           if not aligns or any(a < 0x4000 for a in aligns):
               raise SystemExit(f'Bad ELF LOAD alignment: {[hex(a) for a in aligns]}')
           PY
-          grep -qx 'path=/system_ext/bin/hyos_spawner lib/arm64-v8a/libmiweatherlocation_hyos.so' zn-module/zn_modules.txt
-          test -s zn-module/action.sh
 
-      - name: Package Zygisk Next HYOS probe
-        run: |
-          rm -rf build/zn-module
-          mkdir -p build/zn-module/lib/arm64-v8a
-          cp zn-module/module.prop build/zn-module/
-          cp zn-module/zn_modules.txt build/zn-module/
-          cp zn-module/action.sh build/zn-module/
-          chmod 0755 build/zn-module/action.sh
-          HYOS_SO=$(find app/build/intermediates/cxx/Debug -type f -name 'libmiweatherlocation_hyos.so' | head -n 1)
-          cp "$HYOS_SO" build/zn-module/lib/arm64-v8a/
-          (cd build/zn-module && zip -9 -r ../../MiWeatherLocation-ZN-HYOS-Probe.zip .)
-          unzip -l MiWeatherLocation-ZN-HYOS-Probe.zip
-          sha256sum MiWeatherLocation-ZN-HYOS-Probe.zip
-
-      - name: Upload build artifacts
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: MiWeatherLocation-ZN-HYOS-Probe
-          path: |
-            MiWeatherLocation-ZN-HYOS-Probe.zip
-            app/build/outputs/apk/debug/app-debug.apk
+          name: MiWeatherLocation-LSPosed-HYOS
+          path: app/build/outputs/apk/debug/app-debug.apk
