@@ -117,7 +117,9 @@ public final class MainActivity extends Activity {
         sb.append("App version: 0.1.4-root-probe\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
-        sb.append("Current userId: ").append(UserHandle.myUserId()).append('\n');
+        sb.append("Current userId: ")
+                .append(UserHandle.getUserHandleForUid(Process.myUid()).getIdentifier())
+                .append('\n');
         sb.append("Module uid: ").append(Process.myUid()).append("\n\n");
 
         appendPackageInfo(sb, "Weather package", WEATHER);
