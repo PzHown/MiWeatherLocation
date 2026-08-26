@@ -1,6 +1,6 @@
 id=miweatherlocation_hyos
-name=MiWeatherLocation HYOS Runtime Probe
-version=0.6.0-alpha1
-versionCode=16
+name=MiWeatherLocation HYOS Lifecycle Diagnostic
+version=0.6.1-alpha1
+versionCode=17
 author=PzHown
-description=Zygisk Next 1.5.0 HYOS Runtime probe for Xiaomi Weather. Requires Zygisk Next 1.5.0+.
+description=Zygisk Next 1.5.0 HYOS lifecycle diagnostic for Xiaomi Weather. Writes inherited-fd status markers only; no SQLite or loader hooks.
