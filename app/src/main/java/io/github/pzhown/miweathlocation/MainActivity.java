@@ -49,7 +49,7 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("天气是实际目标；系统设置是无 Hook 对照探针。打开本页后会自动申请 root，并检查两边的 LSPosed/Zygisk native 注入痕迹。");
+        hint.setText("天气是实际目标；系统设置是无 Hook 对照探针。新版会识别 :remote 等子进程，并读取 Zygisk Next 配置及所有目标进程。");
         hint.setPadding(0, dp(8), 0, dp(12));
         root.addView(hint);
 
@@ -123,7 +123,7 @@ public final class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         int moduleUid = Process.myUid();
         int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: 0.1.5-deep-probe\n");
+        sb.append("App version: 0.1.6-zygisknext-probe\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
         sb.append("Current userId: ").append(userId).append('\n');
@@ -169,16 +169,16 @@ public final class MainActivity extends Activity {
                 }
 
                 boolean weatherRunning = targets.stream()
-                        .anyMatch(t -> WEATHER.equals(t.getProcessName()));
+                        .anyMatch(t -> matchesProcess(WEATHER, t.getProcessName()));
                 boolean settingsRunning = targets.stream()
-                        .anyMatch(t -> SETTINGS.equals(t.getProcessName()));
+                        .anyMatch(t -> matchesProcess(SETTINGS, t.getProcessName()));
                 sb.append("Weather hooked target present: ").append(weatherRunning).append('\n');
                 sb.append("Settings probe hooked target present: ").append(settingsRunning).append('\n');
                 sb.append("\nService conclusion: ");
                 if (settingsRunning && !weatherRunning) {
                     sb.append("LSPosed module loading works in the control target; Xiaomi Weather is being skipped specifically.\n");
                 } else if (!settingsRunning && !weatherRunning) {
-                    sb.append("Neither scoped target loaded this module; correlate with the native probe below.\n");
+                    sb.append("Neither scoped target loaded this module; correlate with the root probe below.\n");
                 } else if (weatherRunning) {
                     sb.append("Weather module entry is loaded; continue with hook/SQLite diagnostics.\n");
                 } else {
@@ -191,12 +191,17 @@ public final class MainActivity extends Activity {
                     .append(t.getMessage()).append('\n');
             for (StackTraceElement e : t.getStackTrace()) {
                 sb.append("  at ").append(e).append('\n');
-                if (sb.length() > 10000) break;
+                if (sb.length() > 12000) break;
             }
         }
 
         sb.append('\n').append(lastRootProbe);
         output.setText(sb.toString());
+    }
+
+    private boolean matchesProcess(String packageName, String processName) {
+        return packageName.equals(processName)
+                || (processName != null && processName.startsWith(packageName + ":"));
     }
 
     private void appendPackageInfo(StringBuilder sb, String label, String packageName) {
@@ -263,18 +268,27 @@ public final class MainActivity extends Activity {
                     + "echo '=== magisk ==='; magisk -V 2>/dev/null || true; "
                     + "echo '=== package paths ==='; pm path com.miui.weather2 2>&1; pm path com.android.settings 2>&1; "
                     + "echo '=== related modules ==='; ls -1 /data/adb/modules 2>/dev/null | grep -Ei 'lsposed|lspd|zygisk|riru|shamiko' || true; "
+                    + "echo '=== Zygisk Next module ==='; "
+                    + "if [ -f /data/adb/modules/zygisksu/module.prop ]; then grep -E '^(id|name|version|versionCode)=' /data/adb/modules/zygisksu/module.prop 2>/dev/null || true; else echo zygisksu_module=missing; fi; "
+                    + "echo '=== Zygisk Next config ==='; "
+                    + "printf 'denylist_enforce='; cat /data/adb/zygisksu/denylist_enforce 2>/dev/null || echo missing; "
+                    + "printf 'memory_type='; cat /data/adb/zygisksu/memory_type 2>/dev/null || echo missing; "
+                    + "printf 'linker='; cat /data/adb/zygisksu/linker 2>/dev/null || echo missing; "
+                    + "if [ -e /data/adb/shamiko/whitelist ]; then echo shamiko_whitelist=present; else echo shamiko_whitelist=absent; fi; "
+                    + "if [ -f /data/adb/shamiko/.tmp/status ]; then printf 'shamiko_status='; cat /data/adb/shamiko/.tmp/status 2>/dev/null || true; fi; "
                     + "echo '=== denylist matches ==='; magisk --denylist ls 2>/dev/null | grep -E 'com\\.miui\\.weather2|com\\.android\\.settings' || true; "
                     + "echo '=== lspd processes ==='; ps -A 2>/dev/null | grep -Ei 'lspd|lsposed' || true; "
-                    + "WPID=$(pidof com.miui.weather2 | awk '{print $1}'); echo weather_pid=$WPID; "
-                    + "if [ -n \"$WPID\" ]; then "
-                    + "WHITS=$(grep -Eic 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$WPID/maps 2>/dev/null || true); echo weather_native_hits=$WHITS; "
-                    + "echo '=== weather injected libraries ==='; grep -Ei 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$WPID/maps 2>/dev/null | head -n 80 || true; "
-                    + "fi; "
-                    + "SPID=$(pidof com.android.settings | awk '{print $1}'); echo settings_pid=$SPID; "
-                    + "if [ -n \"$SPID\" ]; then "
-                    + "SHITS=$(grep -Eic 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$SPID/maps 2>/dev/null || true); echo settings_native_hits=$SHITS; "
-                    + "echo '=== settings injected libraries ==='; grep -Ei 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$SPID/maps 2>/dev/null | head -n 80 || true; "
-                    + "fi";
+                    + "echo '=== weather processes ==='; "
+                    + "for PID in $(ps -A 2>/dev/null | awk '$NF ~ /^com\\.miui\\.weather2(:|$)/ {print $2}'); do "
+                    + "CMD=$(tr '\\000' ' ' < /proc/$PID/cmdline 2>/dev/null); echo weather_process pid=$PID cmd=$CMD; "
+                    + "HITS=$(grep -Eic 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$PID/maps 2>/dev/null || true); echo weather_native_hits pid=$PID count=$HITS; "
+                    + "grep -Ei 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$PID/maps 2>/dev/null | head -n 30 || true; done; "
+                    + "echo '=== settings processes ==='; "
+                    + "for PID in $(ps -A 2>/dev/null | awk '$NF ~ /^com\\.android\\.settings(:|$)/ {print $2}'); do "
+                    + "CMD=$(tr '\\000' ' ' < /proc/$PID/cmdline 2>/dev/null); echo settings_process pid=$PID cmd=$CMD; "
+                    + "HITS=$(grep -Eic 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$PID/maps 2>/dev/null || true); echo settings_native_hits pid=$PID count=$HITS; "
+                    + "grep -Ei 'lsposed|lspd|lsplant|zygisk|libxposed|riru' /proc/$PID/maps 2>/dev/null | head -n 30 || true; done";
+
             StringBuilder result = new StringBuilder("Root injection probe:\n");
             try {
                 java.lang.Process proc = Runtime.getRuntime().exec(new String[]{"su", "-c", script});
@@ -291,20 +305,8 @@ public final class MainActivity extends Activity {
                 int exit = proc.waitFor();
                 result.append("exitCode=").append(exit).append('\n');
                 result.append("Root interpretation:\n");
-                if (result.indexOf("weather_pid=\n") >= 0) {
-                    result.append("- Weather process is not running. Open Xiaomi Weather and run the probe again.\n");
-                } else if (result.indexOf("weather_native_hits=0") >= 0) {
-                    result.append("- Weather is running but has no obvious LSPosed/Zygisk/LSPlant mapping. Native injection is likely absent or intentionally hidden/unmapped.\n");
-                } else {
-                    result.append("- Weather has native injection-related mappings. If Running Targets remains 0, focus on Modern Java module loading.\n");
-                }
-                if (result.indexOf("settings_pid=\n") >= 0) {
-                    result.append("- Settings process is not running; open Settings and run the probe again for the control comparison.\n");
-                } else if (result.indexOf("settings_native_hits=0") >= 0) {
-                    result.append("- Settings also has no obvious native injection mapping. This points to a broader injection/backend issue.\n");
-                } else {
-                    result.append("- Settings has native injection-related mappings. Compare this with Weather to see whether Weather is skipped specifically.\n");
-                }
+                result.append("- /proc/maps names are heuristic only; Zygisk Next can use anonymous loading, so zero named hits does not prove that Zygisk is absent.\n");
+                result.append("- Compare Zygisk Next denylist/linker/memory settings with LSPosed Running Targets above.\n");
             } catch (Throwable t) {
                 result.append("Root probe exception: ")
                         .append(t.getClass().getName()).append(": ")
