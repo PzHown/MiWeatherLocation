@@ -2,13 +2,14 @@
 
 #include <android/log.h>
 #include <dlfcn.h>
-#include <jni.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <link.h>
 #include <unistd.h>
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
@@ -20,6 +21,7 @@ namespace {
 
 constexpr const char *kTag = "MiWeatherLocationNative";
 constexpr const char *kTargetPackage = "com.miui.weather2";
+constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kPosId = "23.106_113.325";
 constexpr const char *kName = "广州塔";
 constexpr const char *kStreetName = "阅江西路";
@@ -31,31 +33,66 @@ constexpr const char *kLocale = "zh_cn";
 
 std::atomic<bool> gWorkerStarted{false};
 
+std::string readSmallFile(const char *path, size_t limit = 512) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return {};
+    std::string value(limit, '\0');
+    ssize_t n;
+    do {
+        n = read(fd, value.data(), value.size() - 1);
+    } while (n < 0 && errno == EINTR);
+    close(fd);
+    if (n <= 0) return {};
+    value.resize(static_cast<size_t>(n));
+    size_t zero = value.find('\0');
+    if (zero != std::string::npos) value.resize(zero);
+    return value;
+}
+
+std::string readExecutable() {
+    char buffer[256]{};
+    ssize_t n = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(buffer)) return {};
+    buffer[n] = '\0';
+    return std::string(buffer);
+}
+
+std::string readProcessName() {
+    return readSmallFile("/proc/self/cmdline", 256);
+}
+
+bool isTargetHyosProcess() {
+    return readExecutable() == kSpawnerPath && readProcessName() == kTargetPackage;
+}
+
+void fileLog(const char *message) {
+    static constexpr const char *paths[] = {
+            "/data/user_de/0/com.miui.weather2/cache/miweatherlocation_native.log",
+            "/data/user/0/com.miui.weather2/cache/miweatherlocation_native.log",
+            "/data/data/com.miui.weather2/cache/miweatherlocation_native.log",
+    };
+    for (const char *path : paths) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (fd < 0) continue;
+        char line[2300]{};
+        int n = snprintf(line, sizeof(line), "%s\n", message == nullptr ? "" : message);
+        if (n > 0) {
+            if (static_cast<size_t>(n) >= sizeof(line)) n = static_cast<int>(sizeof(line) - 1);
+            (void) write(fd, line, static_cast<size_t>(n));
+        }
+        close(fd);
+        return;
+    }
+}
+
 void logLine(int priority, const char *fmt, ...) {
-    char buffer[2048];
+    char buffer[2048]{};
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buffer, sizeof(buffer), fmt, ap);
     va_end(ap);
-    __android_log_print(priority, kTag, "%s", buffer);
-}
-
-std::string readProcessName() {
-    FILE *fp = fopen("/proc/self/cmdline", "rb");
-    if (fp == nullptr) return {};
-    char buffer[256]{};
-    size_t n = fread(buffer, 1, sizeof(buffer) - 1, fp);
-    fclose(fp);
-    if (n == 0) return {};
-    buffer[sizeof(buffer) - 1] = '\0';
-    return std::string(buffer);
-}
-
-bool isTargetProcess() {
-    const std::string process = readProcessName();
-    if (process == kTargetPackage) return true;
-    const std::string prefix = std::string(kTargetPackage) + ":";
-    return process.rfind(prefix, 0) == 0;
+    __android_log_write(priority, kTag, buffer);
+    fileLog(buffer);
 }
 
 struct FindLibraryContext {
@@ -129,9 +166,7 @@ SqliteApi loadSqliteApi() {
         api.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
         if (api.handle == nullptr) api.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     }
-    if (api.handle == nullptr) {
-        api.handle = dlopen("libsqlite3.so", RTLD_NOW | RTLD_NOLOAD);
-    }
+    if (api.handle == nullptr) api.handle = dlopen("libsqlite3.so", RTLD_NOW | RTLD_NOLOAD);
     if (api.handle == nullptr) return api;
 
     api.openV2 = reinterpret_cast<SqliteApi::OpenV2>(resolveSymbol(api.handle, "sqlite3_open_v2"));
@@ -218,10 +253,10 @@ bool insertFavorite(const SqliteApi &api, sqlite3 *db) {
 }
 
 std::string findWeatherDatabase() {
-    static const char *candidates[] = {
+    static constexpr const char *candidates[] = {
             "/data/user_de/0/com.miui.weather2/databases/weather.db",
             "/data/user/0/com.miui.weather2/databases/weather.db",
-            "/data/data/com.miui.weather2/databases/weather.db"
+            "/data/data/com.miui.weather2/databases/weather.db",
     };
     for (const char *path : candidates) {
         if (access(path, R_OK | W_OK) == 0) return path;
@@ -240,10 +275,8 @@ bool ensureFavorite(const SqliteApi &api, const std::string &dbPath) {
     }
 
     if (api.busyTimeout) api.busyTimeout(db, 3000);
-    bool success = false;
-
     if (!tableExists(api, db)) {
-        logLine(ANDROID_LOG_WARN, "selectedcity not ready yet");
+        logLine(ANDROID_LOG_WARN, "selectedcity table not ready yet");
         api.close(db);
         return false;
     }
@@ -255,13 +288,13 @@ bool ensureFavorite(const SqliteApi &api, const std::string &dbPath) {
         return true;
     }
 
+    bool success = false;
     if (execSql(api, db, "BEGIN IMMEDIATE") == SQLITE_OK) {
         if (execSql(api, db,
                     "UPDATE selectedcity SET position=position+1 WHERE flag=0 AND position>=1") == SQLITE_OK
-                && insertFavorite(api, db)) {
-            if (execSql(api, db, "COMMIT") == SQLITE_OK) {
-                success = favoritePosition(api, db) == 1;
-            }
+                && insertFavorite(api, db)
+                && execSql(api, db, "COMMIT") == SQLITE_OK) {
+            success = favoritePosition(api, db) == 1;
         }
         if (!success) execSql(api, db, "ROLLBACK");
     }
@@ -269,15 +302,20 @@ bool ensureFavorite(const SqliteApi &api, const std::string &dbPath) {
     api.close(db);
     if (success) {
         logLine(ANDROID_LOG_INFO,
-                "favorite injection OK: 广州塔 flag=0 position=1; flag=1 current location was never modified");
+                "favorite injection OK name=广州塔 flag=0 position=1; flag=1 current location untouched");
     }
     return success;
 }
 
 void injectionWorker() {
-    logLine(ANDROID_LOG_INFO, "LSPosed native worker entered process=%s", readProcessName().c_str());
+    logLine(ANDROID_LOG_INFO, "HYOS worker started exe=%s process=%s",
+            readExecutable().c_str(), readProcessName().c_str());
 
-    for (int attempt = 1; attempt <= 160; ++attempt) {
+    for (int attempt = 1; attempt <= 240; ++attempt) {
+        if (!isTargetHyosProcess()) {
+            logLine(ANDROID_LOG_ERROR, "worker left target HYOS process unexpectedly");
+            return;
+        }
         if (findLoadedLibrary({"libweather_app.so"}).empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
             continue;
@@ -289,23 +327,21 @@ void injectionWorker() {
             logLine(ANDROID_LOG_INFO, "Weather native runtime ready attempt=%d db=%s", attempt, dbPath.c_str());
             if (ensureFavorite(sqlite, dbPath)) return;
         }
-
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 
-    logLine(ANDROID_LOG_ERROR,
-            "native worker timed out waiting for libweather_app.so/sqlite/weather.db");
+    logLine(ANDROID_LOG_ERROR, "worker timed out waiting for Weather runtime/sqlite/weather.db");
 }
 
 void ensureWorkerStarted() {
-    if (!isTargetProcess()) return;
+    if (!isTargetHyosProcess()) return;
     bool expected = false;
     if (!gWorkerStarted.compare_exchange_strong(expected, true)) return;
     std::thread(injectionWorker).detach();
 }
 
 void onLibraryLoaded(const char *name, void *) {
-    if (!isTargetProcess() || name == nullptr) return;
+    if (!isTargetHyosProcess() || name == nullptr) return;
     if (strstr(name, "libweather_app.so") != nullptr
             || strstr(name, "libsqlite3.so") != nullptr
             || strstr(name, "libmisqlite3.so") != nullptr) {
@@ -316,21 +352,15 @@ void onLibraryLoaded(const char *name, void *) {
 
 }  // namespace
 
-extern "C" [[gnu::visibility("default")]] [[gnu::used]]
+extern "C" __attribute__((visibility("default"), used))
 NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
-    if (isTargetProcess()) {
-        logLine(ANDROID_LOG_INFO, "native_init apiVersion=%u process=%s",
-                entries ? entries->version : 0, readProcessName().c_str());
-        ensureWorkerStarted();
+    if (entries == nullptr || entries->hook_func == nullptr || entries->unhook_func == nullptr
+            || !isTargetHyosProcess()) {
+        return nullptr;
     }
+    logLine(ANDROID_LOG_INFO,
+            "native entry initialized in Weather HYOS child apiVersion=%u exe=%s process=%s",
+            entries->version, readExecutable().c_str(), readProcessName().c_str());
+    ensureWorkerStarted();
     return onLibraryLoaded;
-}
-
-extern "C" JNIEXPORT jint JNICALL
-JNI_OnLoad(JavaVM *, void *) {
-    if (isTargetProcess()) {
-        logLine(ANDROID_LOG_INFO, "JNI_OnLoad from APK-embedded LSPosed native payload");
-        ensureWorkerStarted();
-    }
-    return JNI_VERSION_1_6;
 }
