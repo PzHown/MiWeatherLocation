@@ -124,7 +124,6 @@ public final class MainActivity extends Activity {
                             .append(" pid=").append(target.getPid())
                             .append(" uid=").append(target.getUid())
                             .append(" state=").append(target.getState())
-                            .append(" loadedVersionCode=").append(target.getLoadedModuleVersionCode())
                             .append('\n');
                     String process = target.getProcessName();
                     if (WEATHER.equals(process) || process.startsWith(WEATHER + ":")) {
