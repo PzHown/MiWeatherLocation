@@ -17,6 +17,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStreamReader;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -26,8 +27,12 @@ import io.github.libxposed.service.XposedService;
 public final class MainActivity extends Activity {
     private static final String WEATHER = "com.miui.weather2";
     private static final String SYSTEM = "system";
+    private static final String PROXY = "libmiweatherlocation.so";
+    private static final String WEATHER_RUST = "libweather_app.so";
     private static final int PER_USER_RANGE = 100000;
+
     private TextView output;
+    private volatile String operationText = "Proxy deployment: not run\n";
     private volatile String rootProbeText = "RustProcess runtime probe: not run\n";
 
     @Override
@@ -45,9 +50,14 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("HyperOS 4 Rust 方案：LSPosed 在 system_server Hook RustProcessImpl.startRustProcess，再让内置 native proxy 启动原始小米天气。仍然只有一个 APK，不需要 MiWeatherLocation Magisk 模块。首次升级后请确认 LSPosed 作用域包含“系统框架/system”。");
+        hint.setText("HyperOS 4 Rust 主线：Modern libxposed API 102 在 system_server 的 onSystemServerStarting() Hook RustProcessImpl.startRustProcess；root 仅用于把 proxy 作为 sibling .so 部署到小米天气 native 目录。不需要额外 Magisk 模块。升级后先点“部署/更新 Rust proxy”，再重启手机。");
         hint.setPadding(0, dp(8), 0, dp(12));
         root.addView(hint);
+
+        Button deploy = new Button(this);
+        deploy.setText("部署/更新 Rust proxy");
+        deploy.setOnClickListener(v -> deployProxy());
+        root.addView(deploy);
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -97,9 +107,10 @@ public final class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         int moduleUid = Process.myUid();
         int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: 0.4.0-rustprocess-proxy-alpha\n");
-        sb.append("Architecture: LSPosed system_server RustProcess hook + embedded HYOS Weather proxy\n");
+        sb.append("App version: 0.4.1-modern-systemserver-alpha\n");
+        sb.append("Architecture: Modern API102 system_server hook + Weather sibling HYOS proxy\n");
         sb.append("Separate Magisk module required: false\n");
+        sb.append("Root required for sibling proxy deployment: true\n");
         sb.append("16 KB ELF alignment: enabled\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
@@ -107,6 +118,7 @@ public final class MainActivity extends Activity {
         sb.append("Module uid: ").append(moduleUid).append("\n\n");
 
         appendPackageInfo(sb, "Weather package", WEATHER);
+        appendProxyPaths(sb);
         appendRustStatus(sb);
         sb.append('\n');
 
@@ -125,7 +137,7 @@ public final class MainActivity extends Activity {
                 sb.append("Scope contains system: ").append(scope.contains(SYSTEM)).append('\n');
                 sb.append("Scope contains weather: ").append(scope.contains(WEATHER)).append('\n');
                 if (!scope.contains(SYSTEM)) {
-                    sb.append("ACTION REQUIRED: enable 系统框架/system scope; Weather itself is not the Rust hook host.\n");
+                    sb.append("ACTION REQUIRED: system scope is missing. Re-enable the module/static scope and reboot.\n");
                 }
                 if (service.getApiVersion() >= 102) {
                     var targets = service.getRunningTargets();
@@ -137,7 +149,7 @@ public final class MainActivity extends Activity {
                                 .append(" state=").append(target.getState())
                                 .append('\n');
                     }
-                    sb.append("Note: Weather is spawned by hyos_spawner, so Weather not appearing here is expected on stock LSPosed.\n");
+                    sb.append("Expected hook host: system_server/system. Weather itself may not appear because it is spawned by hyos_spawner.\n");
                 }
             } catch (Throwable t) {
                 sb.append("LSPosed service diagnostic error: ")
@@ -146,6 +158,7 @@ public final class MainActivity extends Activity {
             }
         }
 
+        sb.append('\n').append(operationText);
         sb.append('\n').append(rootProbeText);
         output.setText(sb.toString());
     }
@@ -176,6 +189,7 @@ public final class MainActivity extends Activity {
                     .append(" process=").append(info.processName)
                     .append(" hasCode=").append((info.flags & ApplicationInfo.FLAG_HAS_CODE) != 0)
                     .append(" dataDir=").append(info.dataDir)
+                    .append(" nativeLibraryDir=").append(info.nativeLibraryDir)
                     .append(" enabled=").append(info.enabled);
             if (info.metaData != null) {
                 sb.append(" hyperos_package=").append(info.metaData.getBoolean("hyperos_package", false))
@@ -188,6 +202,90 @@ public final class MainActivity extends Activity {
                     .append(t.getClass().getSimpleName()).append(':')
                     .append(t.getMessage()).append('\n');
         }
+    }
+
+    private void appendProxyPaths(StringBuilder sb) {
+        try {
+            ApplicationInfo self = getPackageManager().getApplicationInfo(getPackageName(), 0);
+            ApplicationInfo weather = getPackageManager().getApplicationInfo(WEATHER, 0);
+            File source = new File(self.nativeLibraryDir, PROXY);
+            File original = new File(weather.nativeLibraryDir, WEATHER_RUST);
+            File sibling = new File(weather.nativeLibraryDir, PROXY);
+            sb.append("Proxy source: ").append(source.getAbsolutePath())
+                    .append(" exists=").append(source.isFile())
+                    .append(" size=").append(source.isFile() ? source.length() : -1).append('\n');
+            sb.append("Weather original: ").append(original.getAbsolutePath())
+                    .append(" exists=").append(original.isFile()).append('\n');
+            sb.append("Weather sibling proxy: ").append(sibling.getAbsolutePath())
+                    .append(" exists=").append(sibling.isFile())
+                    .append(" size=").append(sibling.isFile() ? sibling.length() : -1).append('\n');
+        } catch (Throwable t) {
+            sb.append("Proxy path query error: ").append(t).append('\n');
+        }
+    }
+
+    private void deployProxy() {
+        operationText = "Proxy deployment: RUNNING...\n";
+        refreshDiagnostics();
+        new Thread(() -> {
+            String result;
+            try {
+                result = executeProxyDeployment();
+            } catch (Throwable t) {
+                result = "Proxy deployment: ERROR " + t + "\n";
+            }
+            operationText = result;
+            runOnUiThread(() -> {
+                refreshDiagnostics();
+                Toast.makeText(this,
+                        result.contains("DEPLOY_OK") ? "Rust proxy 已部署，请重启手机" : "Rust proxy 部署失败，请复制诊断",
+                        Toast.LENGTH_LONG).show();
+            });
+        }, "proxy-deploy").start();
+    }
+
+    private String executeProxyDeployment() throws Exception {
+        ApplicationInfo self = getPackageManager().getApplicationInfo(getPackageName(), 0);
+        ApplicationInfo weather = getPackageManager().getApplicationInfo(WEATHER, 0);
+        File source = new File(self.nativeLibraryDir, PROXY);
+        File original = new File(weather.nativeLibraryDir, WEATHER_RUST);
+        File target = new File(weather.nativeLibraryDir, PROXY);
+
+        String script = "set -e\n"
+                + "SRC=" + shellQuote(source.getAbsolutePath()) + "\n"
+                + "ORIGINAL=" + shellQuote(original.getAbsolutePath()) + "\n"
+                + "TARGET=" + shellQuote(target.getAbsolutePath()) + "\n"
+                + "TMP=\"$TARGET.tmp\"\n"
+                + "echo source=$SRC\n"
+                + "echo original=$ORIGINAL\n"
+                + "echo target=$TARGET\n"
+                + "test -f \"$SRC\"\n"
+                + "test -f \"$ORIGINAL\"\n"
+                + "am force-stop " + WEATHER + " >/dev/null 2>&1 || true\n"
+                + "rm -f \"$TMP\"\n"
+                + "cp -f \"$SRC\" \"$TMP\"\n"
+                + "uidgid=$(stat -c '%u:%g' \"$ORIGINAL\")\n"
+                + "mode=$(stat -c '%a' \"$ORIGINAL\")\n"
+                + "chown \"$uidgid\" \"$TMP\" || true\n"
+                + "chmod \"$mode\" \"$TMP\" || chmod 755 \"$TMP\"\n"
+                + "ctx=$(ls -Zd \"$ORIGINAL\" 2>/dev/null | awk '{print $1}')\n"
+                + "if [ -n \"$ctx\" ]; then chcon \"$ctx\" \"$TMP\" 2>/dev/null || true; fi\n"
+                + "mv -f \"$TMP\" \"$TARGET\"\n"
+                + "if [ -n \"$ctx\" ]; then chcon \"$ctx\" \"$TARGET\" 2>/dev/null || true; fi\n"
+                + "test -s \"$TARGET\"\n"
+                + "echo '=== deployed file ==='\n"
+                + "ls -lZ \"$TARGET\" 2>/dev/null || ls -l \"$TARGET\"\n"
+                + "echo '=== hashes ==='\n"
+                + "sha256sum \"$SRC\" \"$TARGET\"\n"
+                + "a=$(sha256sum \"$SRC\" | awk '{print $1}')\n"
+                + "b=$(sha256sum \"$TARGET\" | awk '{print $1}')\n"
+                + "[ \"$a\" = \"$b\" ]\n"
+                + "echo DEPLOY_OK\n";
+        java.lang.Process process = new ProcessBuilder("su", "-c", script)
+                .redirectErrorStream(true)
+                .start();
+        String output = readProcessOutput(process, 15);
+        return "Proxy deployment: " + (process.exitValue() == 0 ? "COMPLETED\n" : "FAILED\n") + output;
     }
 
     private void runRuntimeProbe() {
@@ -206,43 +304,60 @@ public final class MainActivity extends Activity {
     }
 
     private String executeRuntimeProbe() throws Exception {
-        String script = """
-                echo '=== weather process ==='
-                ps -A 2>/dev/null | grep 'com.miui.weather2' || true
-                pid=$(ps -A 2>/dev/null | awk '$NF ~ /^com\\.miui\\.weather2(:|$)/ {print $2; exit}')
-                if [ -n "$pid" ]; then
-                  echo weather_pid=$pid
-                  printf 'weather_exe='; readlink /proc/$pid/exe 2>/dev/null || true
-                  echo '=== weather proxy/original maps ==='
-                  grep -E 'miweatherlocation|libweather_app.so|base.apk' /proc/$pid/maps 2>/dev/null | head -n 80 || true
-                fi
-                echo '=== MiWeatherLocation / RustProcess logs ==='
-                logcat -d -b all 2>/dev/null | grep -E 'MiWeatherLocation|MiWeatherLocationProxy|RustProcessImpl|hyos_spawner|rust fork' | tail -n 320
-                echo '=== LSPosed persistent matches ==='
-                for f in /data/adb/lspd/log/* /data/adb/lspd/log/*/*; do
-                  [ -f "$f" ] || continue
-                  grep -aH -E 'MiWeatherLocation|RustProcessImpl|com\\.miui\\.weather2' "$f" 2>/dev/null
-                done | tail -n 220
-                """;
+        ApplicationInfo self = getPackageManager().getApplicationInfo(getPackageName(), 0);
+        ApplicationInfo weather = getPackageManager().getApplicationInfo(WEATHER, 0);
+        String source = new File(self.nativeLibraryDir, PROXY).getAbsolutePath();
+        String sibling = new File(weather.nativeLibraryDir, PROXY).getAbsolutePath();
+        String original = new File(weather.nativeLibraryDir, WEATHER_RUST).getAbsolutePath();
+
+        String script = "echo '=== proxy files ==='\n"
+                + "ls -lZ " + shellQuote(source) + " " + shellQuote(original) + " " + shellQuote(sibling) + " 2>/dev/null || true\n"
+                + "sha256sum " + shellQuote(source) + " " + shellQuote(sibling) + " 2>/dev/null || true\n"
+                + "echo '=== weather process ==='\n"
+                + "ps -A 2>/dev/null | grep 'com.miui.weather2' || true\n"
+                + "pid=$(ps -A 2>/dev/null | awk '$NF ~ /^com\\.miui\\.weather2(:|$)/ {print $2; exit}')\n"
+                + "if [ -n \"$pid\" ]; then\n"
+                + "  echo weather_pid=$pid\n"
+                + "  printf 'weather_exe='; readlink /proc/$pid/exe 2>/dev/null || true\n"
+                + "  echo '=== weather proxy/original maps ==='\n"
+                + "  grep -E 'miweatherlocation|libweather_app.so|base.apk' /proc/$pid/maps 2>/dev/null | head -n 100 || true\n"
+                + "fi\n"
+                + "echo '=== MiWeatherLocation / RustProcess logs ==='\n"
+                + "logcat -d -b all 2>/dev/null | grep -E 'MiWeatherLocation|MiWeatherLocationProxy|RustProcessImpl|hyos_spawner|rust fork' | tail -n 360\n"
+                + "echo '=== LSPosed persistent matches ==='\n"
+                + "for f in /data/adb/lspd/log/* /data/adb/lspd/log/*/*; do\n"
+                + "  [ -f \"$f\" ] || continue\n"
+                + "  grep -aH -E 'MiWeatherLocation|ModuleMain|onSystemServerStarting|RustProcessImpl|com\\.miui\\.weather2' \"$f\" 2>/dev/null\n"
+                + "done | tail -n 280\n";
         java.lang.Process process = new ProcessBuilder("su", "-c", script)
                 .redirectErrorStream(true)
                 .start();
+        return "RustProcess runtime probe: COMPLETED\n" + readProcessOutput(process, 15);
+    }
+
+    private String readProcessOutput(java.lang.Process process, int timeoutSeconds) throws Exception {
         StringBuilder raw = new StringBuilder();
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 raw.append(line).append('\n');
-                if (raw.length() > 30000) raw.delete(0, raw.length() - 30000);
+                if (raw.length() > 36000) {
+                    raw.delete(0, raw.length() - 36000);
+                }
             }
         }
-        boolean exited = process.waitFor(12, TimeUnit.SECONDS);
+        boolean exited = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
         if (!exited) {
             process.destroyForcibly();
             raw.append("probe_timeout=true\n");
         } else {
             raw.append("exitCode=").append(process.exitValue()).append('\n');
         }
-        return "RustProcess runtime probe: COMPLETED\n" + raw;
+        return raw.toString();
+    }
+
+    private static String shellQuote(String value) {
+        return "'" + value.replace("'", "'\\''") + "'";
     }
 
     private void openWeather() {
