@@ -14,7 +14,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -22,8 +22,8 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android 37 platform
-        run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
+      - name: Install Android 36 platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Set up Gradle 9.5.1
         uses: gradle/actions/setup-gradle@v4
