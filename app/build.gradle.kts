@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 37
-        versionCode = 15
-        versionName = "0.5.0-hyos-native-alpha"
+        versionCode = 19
+        versionName = "0.7.0-lsposed-hyos-alpha"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -38,9 +38,8 @@ android {
     }
 
     packaging {
-        // Match working HyperOS 4 native-only LSPosed modules: keep the native
-        // payload as a normal APK JNI library and let LSPosed load it from the
-        // native_init declaration. No sibling copy/proxy deployment is needed.
+        // HYOS-capable LSPosed owns injection. Keep the native payload inside
+        // the APK and declare it through META-INF/xposed/native_init.list.
         jniLibs {
             useLegacyPackaging = false
         }
