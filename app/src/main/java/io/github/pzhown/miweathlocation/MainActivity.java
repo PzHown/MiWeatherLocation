@@ -11,7 +11,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
-import android.os.UserHandle;
 import android.provider.Settings;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -28,6 +27,7 @@ import io.github.libxposed.service.XposedService;
 public final class MainActivity extends Activity {
     private static final String WEATHER = "com.miui.weather2";
     private static final String SETTINGS = "com.android.settings";
+    private static final int PER_USER_RANGE = 100000;
 
     private TextView output;
     private volatile String lastRootProbe = "Root injection probe: not run\n";
@@ -114,13 +114,13 @@ public final class MainActivity extends Activity {
 
     private void refreshDiagnostics() {
         StringBuilder sb = new StringBuilder();
+        int moduleUid = Process.myUid();
+        int userId = moduleUid / PER_USER_RANGE;
         sb.append("App version: 0.1.4-root-probe\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
-        sb.append("Current userId: ")
-                .append(UserHandle.getUserHandleForUid(Process.myUid()).getIdentifier())
-                .append('\n');
-        sb.append("Module uid: ").append(Process.myUid()).append("\n\n");
+        sb.append("Current userId: ").append(userId).append('\n');
+        sb.append("Module uid: ").append(moduleUid).append("\n\n");
 
         appendPackageInfo(sb, "Weather package", WEATHER);
         appendPackageInfo(sb, "Settings probe", SETTINGS);
