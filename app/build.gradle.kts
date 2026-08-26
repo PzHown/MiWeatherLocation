@@ -12,41 +12,21 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 37
-        versionCode = 19
-        versionName = "0.7.0-lsposed-hyos-alpha"
+        versionCode = 20
+        versionName = "0.8.0-current-favorite-alpha"
 
-        ndk {
-            abiFilters += "arm64-v8a"
-        }
-        externalNativeBuild {
-            cmake {
-                arguments += "-DANDROID_STL=c++_static"
-            }
-        }
+        ndk { abiFilters += "arm64-v8a" }
+        externalNativeBuild { cmake { arguments += "-DANDROID_STL=c++_static" } }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
     }
-
-    externalNativeBuild {
-        cmake {
-            path = file("../native/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
-
+    externalNativeBuild { cmake { path = file("../native/CMakeLists.txt"); version = "3.22.1" } }
     packaging {
-        // HYOS-capable LSPosed owns injection. Keep the native payload inside
-        // the APK and declare it through META-INF/xposed/native_init.list.
-        jniLibs {
-            useLegacyPackaging = false
-        }
-        resources {
-            merges += "META-INF/xposed/*"
-            excludes += "META-INF/*.kotlin_module"
-        }
+        jniLibs { useLegacyPackaging = false }
+        resources { merges += "META-INF/xposed/*"; excludes += "META-INF/*.kotlin_module" }
     }
 }
 
