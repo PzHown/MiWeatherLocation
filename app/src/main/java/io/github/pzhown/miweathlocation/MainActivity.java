@@ -5,6 +5,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.os.Build;
 import android.os.Bundle;
@@ -39,7 +40,7 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("纯 LSPosed 单 APK 版本。Native payload 已内置在 APK，不需要另外刷 Magisk / Zygisk 模块。目标仍是只添加广州塔收藏城市，不修改真实定位。");
+        hint.setText("纯 LSPosed 单 APK legacy-bootstrap 版本。Native payload 已内置，不需要另外刷 MiWeatherLocation 的 Magisk / Zygisk 模块。目标仍是只添加广州塔收藏城市，不修改真实定位。");
         hint.setPadding(0, dp(8), 0, dp(12));
         root.addView(hint);
 
@@ -86,21 +87,24 @@ public final class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         int moduleUid = Process.myUid();
         int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: 0.3.0-lsposed-native-alpha\n");
-        sb.append("Architecture: pure LSPosed APK + embedded arm64 native payload\n");
+        sb.append("App version: 0.3.1-lsposed-legacy-bootstrap\n");
+        sb.append("Architecture: pure LSPosed legacy bootstrap + embedded arm64 native payload\n");
+        sb.append("Modern java_init entry: false\n");
         sb.append("Magisk module required: false\n");
+        sb.append("16 KB ELF alignment: enabled at link time\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
         sb.append("Current userId: ").append(userId).append('\n');
         sb.append("Module uid: ").append(moduleUid).append("\n\n");
 
         appendPackageInfo(sb, "Weather package", WEATHER);
+        appendLegacyMarker(sb);
         sb.append('\n');
 
         XposedService service = App.getService();
         if (service == null) {
             sb.append("Xposed Service: NOT CONNECTED\n");
-            sb.append("Conclusion: LSPosed has not connected to the module app yet.\n");
+            sb.append("Note: the legacy bootstrap itself does not depend on the app-side service connection.\n");
             output.setText(sb.toString());
             return;
         }
@@ -114,39 +118,50 @@ public final class MainActivity extends Activity {
             List<String> scope = service.getScope();
             sb.append("Scope: ").append(scope).append('\n');
             sb.append("Scope contains weather: ").append(scope.contains(WEATHER)).append('\n');
+            sb.append("Unexpected extra scopes: ").append(countExtraScopes(scope)).append('\n');
 
-            boolean weatherLoaded = false;
             if (service.getApiVersion() >= 102) {
                 var targets = service.getRunningTargets();
-                sb.append("Running targets count: ").append(targets.size()).append('\n');
+                sb.append("Modern Running targets count: ").append(targets.size()).append('\n');
                 for (var target : targets) {
                     sb.append(" - ").append(target.getProcessName())
                             .append(" pid=").append(target.getPid())
                             .append(" uid=").append(target.getUid())
                             .append(" state=").append(target.getState())
                             .append('\n');
-                    String process = target.getProcessName();
-                    if (WEATHER.equals(process) || process.startsWith(WEATHER + ":")) {
-                        weatherLoaded = true;
-                    }
                 }
-            }
-
-            sb.append("Weather LSPosed target present: ").append(weatherLoaded).append("\n\n");
-            if (weatherLoaded) {
-                sb.append("Conclusion: LSPosed loaded this module into Xiaomi Weather. ")
-                        .append("The embedded native payload is eligible to run even though Weather 18 hasCode=false.\n");
-            } else {
-                sb.append("Conclusion: Xiaomi Weather still is not a Running Target. ")
-                        .append("If this remains false after force-stop/relaunch, the blocker is LSPosed process injection/scope resolution before our Java/native payload can run.\n");
+                sb.append("Note: Running targets is a modern-module diagnostic and is not the success signal for this legacy bootstrap build.\n");
             }
         } catch (Throwable t) {
-            sb.append("LSPosed diagnostic error: ")
+            sb.append("LSPosed service diagnostic error: ")
                     .append(t.getClass().getSimpleName()).append(": ")
                     .append(t.getMessage()).append('\n');
         }
 
         output.setText(sb.toString());
+    }
+
+    private void appendLegacyMarker(StringBuilder sb) {
+        SharedPreferences prefs = getSharedPreferences(HookStatusReceiver.PREFS, MODE_PRIVATE);
+        long timestamp = prefs.getLong(HookStatusReceiver.KEY_TIMESTAMP, 0L);
+        String process = prefs.getString(HookStatusReceiver.KEY_PROCESS, "");
+        if (timestamp <= 0L) {
+            sb.append("Legacy bootstrap marker: NOT RECEIVED\n");
+            return;
+        }
+        long ageMs = Math.max(0L, System.currentTimeMillis() - timestamp);
+        sb.append("Legacy bootstrap marker: RECEIVED")
+                .append(" process=").append(process)
+                .append(" ageMs=").append(ageMs)
+                .append('\n');
+    }
+
+    private int countExtraScopes(List<String> scope) {
+        int count = 0;
+        for (String packageName : scope) {
+            if (!WEATHER.equals(packageName)) count++;
+        }
+        return count;
     }
 
     private void appendPackageInfo(StringBuilder sb, String label, String packageName) {
