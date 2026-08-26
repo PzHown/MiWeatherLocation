@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.3.0-lsposed-native-alpha"
+        versionCode = 10
+        versionName = "0.3.1-lsposed-legacy-bootstrap"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -34,13 +34,12 @@ android {
 
     packaging {
         resources {
-            merges += "META-INF/xposed/*"
             excludes += "META-INF/*.kotlin_module"
         }
     }
 }
 
 dependencies {
-    compileOnly("io.github.libxposed:api:102.0.0")
+    compileOnly("de.robv.android.xposed:api:82")
     implementation("io.github.libxposed:service:102.0.0")
 }
