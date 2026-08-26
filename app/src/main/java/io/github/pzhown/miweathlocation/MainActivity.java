@@ -10,6 +10,7 @@ import android.content.pm.ApplicationInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Process;
+import android.os.SystemClock;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -27,6 +28,7 @@ import io.github.libxposed.service.XposedService;
 public final class MainActivity extends Activity {
     private static final String WEATHER = "com.miui.weather2";
     private static final String SYSTEM = "system";
+    private static final String ANDROID_SCOPE_ALIAS = "android";
     private static final String PROXY = "libmiweatherlocation.so";
     private static final String WEATHER_RUST = "libweather_app.so";
     private static final int PER_USER_RANGE = 100000;
@@ -50,7 +52,7 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("HyperOS 4 Rust 主线：Modern libxposed API 102 在 system_server 的 onSystemServerStarting() Hook RustProcessImpl.startRustProcess；root 仅用于把 proxy 作为 sibling .so 部署到小米天气 native 目录。不需要额外 Magisk 模块。升级后先点“部署/更新 Rust proxy”，再重启手机。");
+        hint.setText("HyperOS 4 Rust 主线：Modern libxposed API 102 在 system_server 的 onSystemServerStarting() Hook RustProcessImpl.startRustProcess；root 仅用于把 proxy 作为 sibling .so 部署到小米天气 native 目录。不需要额外 Magisk 模块。升级后先点“部署/更新 Rust proxy”；如果 APK 是本次开机后更新的，再重启手机一次。");
         hint.setPadding(0, dp(8), 0, dp(12));
         root.addView(hint);
 
@@ -107,7 +109,7 @@ public final class MainActivity extends Activity {
         StringBuilder sb = new StringBuilder();
         int moduleUid = Process.myUid();
         int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: 0.4.1-modern-systemserver-alpha\n");
+        sb.append("App version: 0.4.2-modern-systemserver-alpha\n");
         sb.append("Architecture: Modern API102 system_server hook + Weather sibling HYOS proxy\n");
         sb.append("Separate Magisk module required: false\n");
         sb.append("Root required for sibling proxy deployment: true\n");
@@ -115,7 +117,9 @@ public final class MainActivity extends Activity {
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
         sb.append("Current userId: ").append(userId).append('\n');
-        sb.append("Module uid: ").append(moduleUid).append("\n\n");
+        sb.append("Module uid: ").append(moduleUid).append('\n');
+        boolean updatedAfterBoot = appendBootFreshness(sb);
+        sb.append('\n');
 
         appendPackageInfo(sb, "Weather package", WEATHER);
         appendProxyPaths(sb);
@@ -133,23 +137,41 @@ public final class MainActivity extends Activity {
                 sb.append("Framework code: ").append(service.getFrameworkVersionCode()).append('\n');
                 sb.append("API: ").append(service.getApiVersion()).append('\n');
                 List<String> scope = service.getScope();
+                boolean systemScope = scope.contains(SYSTEM);
+                boolean androidAlias = scope.contains(ANDROID_SCOPE_ALIAS);
+                boolean systemHostVisible = systemScope || androidAlias;
                 sb.append("Scope: ").append(scope).append('\n');
-                sb.append("Scope contains system: ").append(scope.contains(SYSTEM)).append('\n');
+                sb.append("Scope contains system virtual target: ").append(systemScope).append('\n');
+                sb.append("Scope contains android host alias: ").append(androidAlias).append('\n');
+                sb.append("System host scope visible: ").append(systemHostVisible).append('\n');
                 sb.append("Scope contains weather: ").append(scope.contains(WEATHER)).append('\n');
-                if (!scope.contains(SYSTEM)) {
-                    sb.append("ACTION REQUIRED: system scope is missing. Re-enable the module/static scope and reboot.\n");
+                if (!systemHostVisible) {
+                    sb.append("ACTION REQUIRED: neither system nor android is visible in the framework scope. Re-enable the module/static scope and reboot.\n");
+                } else if (!systemScope && androidAlias) {
+                    sb.append("Scope note: this LSPosed service reports android for the system host; do not treat this alone as a missing-system-scope failure. The APK static scope still declares the special system target.\n");
                 }
                 if (service.getApiVersion() >= 102) {
                     var targets = service.getRunningTargets();
+                    boolean systemServerLoaded = false;
                     sb.append("Modern Running targets count: ").append(targets.size()).append('\n');
                     for (var target : targets) {
-                        sb.append(" - ").append(target.getProcessName())
+                        String processName = target.getProcessName();
+                        sb.append(" - ").append(processName)
                                 .append(" pid=").append(target.getPid())
                                 .append(" uid=").append(target.getUid())
                                 .append(" state=").append(target.getState())
                                 .append('\n');
+                        if (isSystemServerProcess(processName)) {
+                            systemServerLoaded = true;
+                        }
                     }
+                    sb.append("System-server hook target present: ").append(systemServerLoaded).append('\n');
                     sb.append("Expected hook host: system_server/system. Weather itself may not appear because it is spawned by hyos_spawner.\n");
+                    if (!systemServerLoaded && updatedAfterBoot) {
+                        sb.append("REBOOT REQUIRED: this APK was updated after the current boot, so the already-running system_server cannot be expected to contain this module generation yet. Deploy the proxy, reboot once, then open Weather.\n");
+                    } else if (!systemServerLoaded) {
+                        sb.append("System-server hook not observed after a boot that already contained this APK generation. Use the RustProcess log probe; this is now a framework/system_server loading problem, not a Weather hasCode=false app-process problem.\n");
+                    }
                 }
             } catch (Throwable t) {
                 sb.append("LSPosed service diagnostic error: ")
@@ -161,6 +183,31 @@ public final class MainActivity extends Activity {
         sb.append('\n').append(operationText);
         sb.append('\n').append(rootProbeText);
         output.setText(sb.toString());
+    }
+
+    private boolean appendBootFreshness(StringBuilder sb) {
+        try {
+            long now = System.currentTimeMillis();
+            long bootEpoch = now - SystemClock.elapsedRealtime();
+            long lastUpdate = getPackageManager().getPackageInfo(getPackageName(), 0).lastUpdateTime;
+            boolean updatedAfterBoot = lastUpdate > bootEpoch + 5000L;
+            sb.append("Module updated after current boot: ").append(updatedAfterBoot)
+                    .append(" lastUpdateEpochMs=").append(lastUpdate)
+                    .append(" bootEpochMs≈").append(bootEpoch)
+                    .append('\n');
+            return updatedAfterBoot;
+        } catch (Throwable t) {
+            sb.append("Module boot freshness: query-error=")
+                    .append(t.getClass().getSimpleName()).append(':')
+                    .append(t.getMessage()).append('\n');
+            return false;
+        }
+    }
+
+    private static boolean isSystemServerProcess(String processName) {
+        return "system_server".equals(processName)
+                || "system".equals(processName)
+                || "android".equals(processName);
     }
 
     private void appendRustStatus(StringBuilder sb) {
@@ -239,7 +286,7 @@ public final class MainActivity extends Activity {
             runOnUiThread(() -> {
                 refreshDiagnostics();
                 Toast.makeText(this,
-                        deployResult.contains("DEPLOY_OK") ? "Rust proxy 已部署，请重启手机" : "Rust proxy 部署失败，请复制诊断",
+                        deployResult.contains("DEPLOY_OK") ? "Rust proxy 已部署；若本 APK 是本次开机后更新，请重启手机一次" : "Rust proxy 部署失败，请复制诊断",
                         Toast.LENGTH_LONG).show();
             });
         }, "proxy-deploy").start();
@@ -315,8 +362,8 @@ public final class MainActivity extends Activity {
         String script = "echo '=== proxy files ==='\n"
                 + "ls -lZ " + shellQuote(source) + " " + shellQuote(original) + " " + shellQuote(sibling) + " 2>/dev/null || true\n"
                 + "sha256sum " + shellQuote(source) + " " + shellQuote(sibling) + " 2>/dev/null || true\n"
-                + "echo '=== weather process ==='\n"
-                + "ps -A 2>/dev/null | grep 'com.miui.weather2' || true\n"
+                + "echo '=== relevant processes ==='\n"
+                + "ps -A 2>/dev/null | grep -E 'system_server|hyos_spawner|com.miui.weather2' || true\n"
                 + "pid=$(ps -A 2>/dev/null | awk '$NF ~ /^com\\.miui\\.weather2(:|$)/ {print $2; exit}')\n"
                 + "if [ -n \"$pid\" ]; then\n"
                 + "  echo weather_pid=$pid\n"
@@ -325,12 +372,12 @@ public final class MainActivity extends Activity {
                 + "  grep -E 'miweatherlocation|libweather_app.so|base.apk' /proc/$pid/maps 2>/dev/null | head -n 100 || true\n"
                 + "fi\n"
                 + "echo '=== MiWeatherLocation / RustProcess logs ==='\n"
-                + "logcat -d -b all 2>/dev/null | grep -E 'MiWeatherLocation|MiWeatherLocationProxy|RustProcessImpl|hyos_spawner|rust fork' | tail -n 360\n"
+                + "logcat -d -b all 2>/dev/null | grep -E 'MiWeatherLocation|MiWeatherLocationProxy|RustProcessImpl|hyos_spawner|rust fork' | tail -n 420\n"
                 + "echo '=== LSPosed persistent matches ==='\n"
                 + "for f in /data/adb/lspd/log/* /data/adb/lspd/log/*/*; do\n"
                 + "  [ -f \"$f\" ] || continue\n"
-                + "  grep -aH -E 'MiWeatherLocation|ModuleMain|onSystemServerStarting|RustProcessImpl|com\\.miui\\.weather2' \"$f\" 2>/dev/null\n"
-                + "done | tail -n 280\n";
+                + "  grep -aH -E 'MiWeatherLocation|io\\.github\\.pzhown\\.miweathlocation|ModuleMain|RustProcess hook ready|Weather Rust spawn' \"$f\" 2>/dev/null\n"
+                + "done | tail -n 360\n";
         java.lang.Process process = new ProcessBuilder("su", "-c", script)
                 .redirectErrorStream(true)
                 .start();
