@@ -12,16 +12,14 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 12
-        versionName = "0.4.0-rustprocess-proxy-alpha"
+        versionCode = 13
+        versionName = "0.4.1-modern-systemserver-alpha"
 
         ndk {
             abiFilters += "arm64-v8a"
         }
         externalNativeBuild {
             cmake {
-                // hyos_spawner loads the proxy before Weather's own libraries,
-                // so avoid a dependency on a separately discoverable libc++_shared.so.
                 arguments += "-DANDROID_STL=c++_static"
             }
         }
@@ -40,13 +38,19 @@ android {
     }
 
     packaging {
+        // The HYOS sibling-proxy deployment copies this library from the module's
+        // extracted nativeLibraryDir into Xiaomi Weather's native directory.
+        jniLibs {
+            useLegacyPackaging = true
+        }
         resources {
+            merges += "META-INF/xposed/*"
             excludes += "META-INF/*.kotlin_module"
         }
     }
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
+    compileOnly("io.github.libxposed:api:102.0.0")
     implementation("io.github.libxposed:service:102.0.0")
 }
