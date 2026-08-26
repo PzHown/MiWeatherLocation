@@ -10,6 +10,28 @@
         android:label="MiWeatherLocation"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="Xiaomi Weather 18 legacy bootstrap + embedded native payload" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="82" />
+        <meta-data
+            android:name="xposedscope"
+            android:resource="@array/xposed_scope" />
+
+        <receiver
+            android:name=".HookStatusReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.pzhown.miweathlocation.LEGACY_BOOTSTRAP_LOADED" />
+            </intent-filter>
+        </receiver>
+
         <activity
             android:name=".MainActivity"
             android:exported="true">
