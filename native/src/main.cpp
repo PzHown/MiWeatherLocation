@@ -1,279 +1,55 @@
 #include "native_api.h"
-
 #include <android/log.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <link.h>
 #include <unistd.h>
-
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
 
 extern "C" {
 struct __attribute__((visibility("default"))) MiWeatherLocationRuntimeState {
-    uint32_t magic;
-    uint32_t version;
-    volatile uint32_t native_init_calls;
-    volatile uint32_t target_matches;
-    volatile uint32_t library_callbacks;
-    volatile uint32_t worker_starts;
-    volatile uint32_t weather_runtime_ready;
-    volatile uint32_t sqlite_ready;
-    volatile uint32_t favorite_present;
-    volatile uint32_t favorite_inserted;
-    volatile int32_t last_sqlite_rc;
-    volatile uint32_t last_attempt;
+ uint32_t magic,version; volatile uint32_t native_init_calls,target_matches,library_callbacks,worker_starts,weather_runtime_ready,sqlite_ready;
+ volatile uint32_t tower_present,tower_inserted,current_location_found; volatile int32_t current_lat_e6,current_lon_e6;
+ volatile uint32_t star_filled,nearest_distance_m; volatile int32_t nearest_favorite_position; volatile uint32_t main_page_hidden_count,toggle_add_count,toggle_remove_count,last_action; volatile int32_t last_sqlite_rc; volatile uint32_t last_attempt;
 };
-
-__attribute__((visibility("default"), used))
-MiWeatherLocationRuntimeState miweatherlocation_runtime_state = {
-        0x4d574c48u, 1u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0, 0u};
+__attribute__((visibility("default"),used)) MiWeatherLocationRuntimeState miweatherlocation_runtime_state={0x4d574c48u,2u,0,0,0,0,0,0,0,0,0,0,0,0,-1,0,0,0,0,0,0};
 }
-
 namespace {
-
-constexpr const char *kTag = "MiWeatherLocationNative";
-constexpr const char *kTargetPackage = "com.miui.weather2";
-constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
-constexpr const char *kPosId = "23.106_113.325";
-constexpr const char *kName = "广州塔";
-constexpr const char *kStreetName = "阅江西路";
-constexpr const char *kLongitude = "113.324521";
-constexpr const char *kLatitude = "23.106428";
-constexpr const char *kBelongings = "广州市, 广东, 中国";
-constexpr const char *kExtra = "weathercn:101280108";
-constexpr const char *kLocale = "zh_cn";
-
-std::atomic<bool> gWorkerStarted{false};
-
-std::string readSmallFile(const char *path, size_t limit = 512) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return {};
-    std::string value(limit, '\0');
-    ssize_t n;
-    do { n = read(fd, value.data(), value.size() - 1); } while (n < 0 && errno == EINTR);
-    close(fd);
-    if (n <= 0) return {};
-    value.resize(static_cast<size_t>(n));
-    size_t zero = value.find('\0');
-    if (zero != std::string::npos) value.resize(zero);
-    return value;
+constexpr const char*kTag="MiWeatherLocationNative",*kTargetPackage="com.miui.weather2",*kSpawnerPath="/system_ext/bin/hyos_spawner";
+constexpr double kRadius=2000.0,kEarth=6371000.0; constexpr const char*kTowerPosId="23.106_113.325",*kTowerName="广州塔",*kTowerStreet="阅江西路",*kTowerLon="113.324521",*kTowerLat="23.106428",*kTowerBelongings="广州市, 广东, 中国",*kTowerExtra="weathercn:101280108",*kLocale="zh_cn";
+std::atomic<bool>gWorkerStarted{false};
+std::string readSmallFile(const char*p,size_t limit=512){int fd=open(p,O_RDONLY|O_CLOEXEC);if(fd<0)return{};std::string v(limit,'\0');ssize_t n;do{n=read(fd,v.data(),v.size()-1);}while(n<0&&errno==EINTR);close(fd);if(n<=0)return{};v.resize((size_t)n);auto z=v.find('\0');if(z!=std::string::npos)v.resize(z);return v;}
+std::string readExecutable(){char b[256]{};ssize_t n=readlink("/proc/self/exe",b,sizeof(b)-1);if(n<=0||(size_t)n>=sizeof(b))return{};b[n]='\0';return b;} std::string readProcessName(){return readSmallFile("/proc/self/cmdline",256);} bool isTarget(){return readExecutable()==kSpawnerPath&&readProcessName()==kTargetPackage;}
+void fileLog(const char*m){for(const char*p:{"/data/user_de/0/com.miui.weather2/cache/miweatherlocation_native.log","/data/user/0/com.miui.weather2/cache/miweatherlocation_native.log"}){int fd=open(p,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0644);if(fd<0)continue;size_t n=strnlen(m?m:"",2047);write(fd,m?m:"",n);write(fd,"\n",1);close(fd);return;}}
+void logLine(int pri,const char*fmt,...){char b[2048]{};va_list ap;va_start(ap,fmt);vsnprintf(b,sizeof(b),fmt,ap);va_end(ap);__android_log_write(pri,kTag,b);fileLog(b);}
+struct FC{std::vector<std::string>n;std::string p;};int findCb(dl_phdr_info*i,size_t,void*d){auto*c=(FC*)d;if(!i||!i->dlpi_name||!i->dlpi_name[0])return 0;std::string p=i->dlpi_name;for(auto&n:c->n)if(p.find(n)!=std::string::npos){c->p=p;return 1;}return 0;}std::string findLib(std::initializer_list<const char*>n){FC c;for(auto*x:n)c.n.emplace_back(x);dl_iterate_phdr(findCb,&c);return c.p;}
+struct sqlite3;struct sqlite3_stmt;struct Sql{using O=int(*)(const char*,sqlite3**,int,const char*);using C=int(*)(sqlite3*);using E=int(*)(sqlite3*,const char*,int(*)(void*,int,char**,char**),void*,char**);using M=const char*(*)(sqlite3*);using P=int(*)(sqlite3*,const char*,int,sqlite3_stmt**,const char**);using S=int(*)(sqlite3_stmt*);using F=int(*)(sqlite3_stmt*);using B=int(*)(sqlite3_stmt*,int,const char*,int,void(*)(void*));using I=int(*)(sqlite3_stmt*,int);using I64=long long(*)(sqlite3_stmt*,int);using T=const unsigned char*(*)(sqlite3_stmt*,int);using BT=int(*)(sqlite3*,int);void*h=nullptr;O o=nullptr;C c=nullptr;E e=nullptr;M m=nullptr;P p=nullptr;S s=nullptr;F f=nullptr;B b=nullptr;I i=nullptr;I64 i64=nullptr;T t=nullptr;BT bt=nullptr;bool ready()const{return h&&o&&c&&e&&m&&p&&s&&f&&b&&i&&i64&&t;}};
+void*sym(void*h,const char*n){void*x=dlsym(h,n);if(!x&&h!=RTLD_DEFAULT)x=dlsym(RTLD_DEFAULT,n);return x;}Sql loadSql(){Sql a;auto p=findLib({"libsqlite3.so","libmisqlite3.so"});if(!p.empty()){a.h=dlopen(p.c_str(),RTLD_NOW|RTLD_NOLOAD);if(!a.h)a.h=dlopen(p.c_str(),RTLD_NOW|RTLD_LOCAL);}if(!a.h)a.h=dlopen("libsqlite3.so",RTLD_NOW|RTLD_NOLOAD);if(!a.h)return a;a.o=(Sql::O)sym(a.h,"sqlite3_open_v2");a.c=(Sql::C)sym(a.h,"sqlite3_close");a.e=(Sql::E)sym(a.h,"sqlite3_exec");a.m=(Sql::M)sym(a.h,"sqlite3_errmsg");a.p=(Sql::P)sym(a.h,"sqlite3_prepare_v2");a.s=(Sql::S)sym(a.h,"sqlite3_step");a.f=(Sql::F)sym(a.h,"sqlite3_finalize");a.b=(Sql::B)sym(a.h,"sqlite3_bind_text");a.i=(Sql::I)sym(a.h,"sqlite3_column_int");a.i64=(Sql::I64)sym(a.h,"sqlite3_column_int64");a.t=(Sql::T)sym(a.h,"sqlite3_column_text");a.bt=(Sql::BT)sym(a.h,"sqlite3_busy_timeout");return a;}
+constexpr int OK=0,ROW=100,DONE=101,RW=2,FULL=0x10000;bool bind(const Sql&a,sqlite3_stmt*s,int i,const std::string&v){return a.b(s,i,v.c_str(),-1,(void(*)(void*))-1)==OK;}std::string col(const Sql&a,sqlite3_stmt*s,int i){auto*x=a.t(s,i);return x?(const char*)x:"";}int exec(const Sql&a,sqlite3*d,const char*q){int r=a.e(d,q,nullptr,nullptr,nullptr);miweatherlocation_runtime_state.last_sqlite_rc=r;if(r!=OK)logLine(ANDROID_LOG_ERROR,"sqlite rc=%d sql=%s err=%s",r,q,a.m?a.m(d):"?");return r;}bool table(const Sql&a,sqlite3*d){sqlite3_stmt*s=nullptr;if(a.p(d,"SELECT 1 FROM sqlite_master WHERE type='table' AND name='selectedcity'",-1,&s,nullptr)!=OK||!s)return false;int r=a.s(s);a.f(s);return r==ROW;}
+bool num(const std::string&s,double&o){char*e=nullptr;errno=0;o=strtod(s.c_str(),&e);return errno==0&&e!=s.c_str()&&*e=='\0'&&std::isfinite(o);}double rad(double x){return x*3.14159265358979323846/180.;}double dist(double a,double b,double c,double d){double x=rad(c-a),y=rad(d-b),z=sin(x/2)*sin(x/2)+cos(rad(a))*cos(rad(c))*sin(y/2)*sin(y/2);return kEarth*2*atan2(sqrt(z),sqrt(1-z));}
+struct City{long long row=-1;int pos=-1;std::string id,name,street,lonS,latS,belong,extra,locale;double lon=0,lat=0;bool valid=false;};City readCity(const Sql&a,sqlite3_stmt*s){City c;c.row=a.i64(s,0);c.pos=a.i(s,1);c.id=col(a,s,2);c.name=col(a,s,3);c.street=col(a,s,4);c.lonS=col(a,s,5);c.latS=col(a,s,6);c.belong=col(a,s,7);c.extra=col(a,s,8);c.locale=col(a,s,9);c.valid=num(c.lonS,c.lon)&&num(c.latS,c.lat);return c;}bool current(const Sql&a,sqlite3*d,City&o){sqlite3_stmt*s=nullptr;if(a.p(d,"SELECT rowid,position,posID,name,street_name,longtitude,latitude,belongings,extra,locale FROM selectedcity WHERE flag=1 ORDER BY position LIMIT 1",-1,&s,nullptr)!=OK||!s)return false;if(a.s(s)!=ROW){a.f(s);return false;}o=readCity(a,s);a.f(s);return true;}
+struct Match{bool found=false;City city;double meters=1e100;uint32_t nearCount=0;};Match nearest(const Sql&a,sqlite3*d,const City&cur){Match m;if(!cur.valid)return m;sqlite3_stmt*s=nullptr;if(a.p(d,"SELECT rowid,position,posID,name,street_name,longtitude,latitude,belongings,extra,locale FROM selectedcity WHERE flag=0 ORDER BY position",-1,&s,nullptr)!=OK||!s)return m;while(a.s(s)==ROW){City c=readCity(a,s);if(!c.valid)continue;double x=dist(cur.lat,cur.lon,c.lat,c.lon);if(x<=kRadius)m.nearCount++;if(!m.found||x<m.meters){m.found=true;m.city=c;m.meters=x;}}a.f(s);return m;}
+void state(const City&c,const Match&m){bool fill=m.found&&m.meters<=kRadius;miweatherlocation_runtime_state.current_location_found=c.valid;miweatherlocation_runtime_state.current_lat_e6=c.valid?(int32_t)llround(c.lat*1e6):0;miweatherlocation_runtime_state.current_lon_e6=c.valid?(int32_t)llround(c.lon*1e6):0;miweatherlocation_runtime_state.star_filled=fill;miweatherlocation_runtime_state.nearest_distance_m=m.found?(uint32_t)llround(m.meters):0;miweatherlocation_runtime_state.nearest_favorite_position=m.found?m.city.pos:-1;miweatherlocation_runtime_state.main_page_hidden_count=m.nearCount;logLine(ANDROID_LOG_INFO,"2km state current=%s %s star=%s nearest=%s %s distance=%.0fm hidden=%u",c.name.c_str(),c.street.c_str(),fill?"FILLED":"OUTLINE",m.found?m.city.name.c_str():"none",m.found?m.city.street.c_str():"",m.found?m.meters:-1.,m.nearCount);}
+bool refresh(const Sql&a,sqlite3*d){City c;if(!current(a,d,c)||!c.valid){miweatherlocation_runtime_state.current_location_found=0;miweatherlocation_runtime_state.star_filled=0;return false;}state(c,nearest(a,d,c));return true;}
+int towerPos(const Sql&a,sqlite3*d){sqlite3_stmt*s=nullptr;if(a.p(d,"SELECT position FROM selectedcity WHERE posID=? AND flag=0 LIMIT 1",-1,&s,nullptr)!=OK||!s)return-1;if(!bind(a,s,1,kTowerPosId)){a.f(s);return-1;}int r=a.s(s),p=r==ROW?a.i(s,0):-1;a.f(s);return p;}bool insertTower(const Sql&a,sqlite3*d){sqlite3_stmt*s=nullptr;if(a.p(d,"INSERT INTO selectedcity(posID,flag,position,name,street_name,longtitude,latitude,belongings,extra,locale) VALUES(?,0,1,?,?,?,?,?,?,?)",-1,&s,nullptr)!=OK||!s)return false;bool ok=bind(a,s,1,kTowerPosId)&&bind(a,s,2,kTowerName)&&bind(a,s,3,kTowerStreet)&&bind(a,s,4,kTowerLon)&&bind(a,s,5,kTowerLat)&&bind(a,s,6,kTowerBelongings)&&bind(a,s,7,kTowerExtra)&&bind(a,s,8,kLocale);int r=ok?a.s(s):-1;a.f(s);return r==DONE;}bool ensureTower(const Sql&a,sqlite3*d){if(towerPos(a,d)>=0){miweatherlocation_runtime_state.tower_present=1;return true;}bool ok=false;if(exec(a,d,"BEGIN IMMEDIATE")==OK){if(exec(a,d,"UPDATE selectedcity SET position=position+1 WHERE flag=0 AND position>=1")==OK&&insertTower(a,d)&&exec(a,d,"COMMIT")==OK)ok=true;if(!ok)exec(a,d,"ROLLBACK");}if(ok){miweatherlocation_runtime_state.tower_present=miweatherlocation_runtime_state.tower_inserted=1;}return ok;}
+std::string posId(const City&c){char b[96];snprintf(b,sizeof(b),"%.3f_%.3f",c.lat,c.lon);return b;}bool insertCurrent(const Sql&a,sqlite3*d,const City&c){sqlite3_stmt*s=nullptr;if(a.p(d,"INSERT INTO selectedcity(posID,flag,position,name,street_name,longtitude,latitude,belongings,extra,locale) VALUES(?,0,1,?,?,?,?,?,?,?)",-1,&s,nullptr)!=OK||!s)return false;std::string id=posId(c),loc=c.locale.empty()?kLocale:c.locale;bool ok=bind(a,s,1,id)&&bind(a,s,2,c.name)&&bind(a,s,3,c.street)&&bind(a,s,4,c.lonS)&&bind(a,s,5,c.latS)&&bind(a,s,6,c.belong)&&bind(a,s,7,c.extra)&&bind(a,s,8,loc);int r=ok?a.s(s):-1;a.f(s);return r==DONE;}
+bool addCurrent(const Sql&a,sqlite3*d,const City&c){bool ok=false;if(exec(a,d,"BEGIN IMMEDIATE")==OK){if(exec(a,d,"UPDATE selectedcity SET position=position+1 WHERE flag=0 AND position>=1")==OK&&insertCurrent(a,d,c)&&exec(a,d,"COMMIT")==OK)ok=true;if(!ok)exec(a,d,"ROLLBACK");}if(ok){miweatherlocation_runtime_state.toggle_add_count++;miweatherlocation_runtime_state.last_action=1;logLine(ANDROID_LOG_INFO,"2km favorite ADD %s %s",c.name.c_str(),c.street.c_str());}return ok;}bool removeNear(const Sql&a,sqlite3*d,const Match&m){if(!m.found||m.meters>kRadius)return false;char q[160],r[160];snprintf(q,sizeof(q),"DELETE FROM selectedcity WHERE rowid=%lld AND flag=0",m.city.row);snprintf(r,sizeof(r),"UPDATE selectedcity SET position=position-1 WHERE flag=0 AND position>%d",m.city.pos);bool ok=false;if(exec(a,d,"BEGIN IMMEDIATE")==OK){if(exec(a,d,q)==OK&&exec(a,d,r)==OK&&exec(a,d,"COMMIT")==OK)ok=true;if(!ok)exec(a,d,"ROLLBACK");}if(ok){miweatherlocation_runtime_state.toggle_remove_count++;miweatherlocation_runtime_state.last_action=2;logLine(ANDROID_LOG_INFO,"2km favorite REMOVE %s %s distance=%.0f",m.city.name.c_str(),m.city.street.c_str(),m.meters);}return ok;}
+int toggle(const Sql&a,sqlite3*d){City c;if(!current(a,d,c)||!c.valid)return-2;Match m=nearest(a,d,c);bool ok=(m.found&&m.meters<=kRadius)?removeNear(a,d,m):addCurrent(a,d,c);state(c,nearest(a,d,c));return ok?(m.found&&m.meters<=kRadius?2:1):-1;}
+std::string dbPath(){for(const char*p:{"/data/user_de/0/com.miui.weather2/databases/weather.db","/data/user/0/com.miui.weather2/databases/weather.db","/data/data/com.miui.weather2/databases/weather.db"})if(access(p,R_OK|W_OK)==0)return p;return{};}bool initDb(const Sql&a,const std::string&p){sqlite3*d=nullptr;int r=a.o(p.c_str(),&d,RW|FULL,nullptr);miweatherlocation_runtime_state.last_sqlite_rc=r;if(r!=OK||!d){if(d)a.c(d);return false;}miweatherlocation_runtime_state.sqlite_ready=1;if(a.bt)a.bt(d,3000);if(!table(a,d)){a.c(d);return false;}bool ok=ensureTower(a,d);refresh(a,d);a.c(d);return ok;}
+void worker(){miweatherlocation_runtime_state.worker_starts++;for(int n=1;n<=240;n++){miweatherlocation_runtime_state.last_attempt=n;if(!isTarget())return;if(findLib({"libweather_app.so"}).empty()){std::this_thread::sleep_for(std::chrono::milliseconds(250));continue;}miweatherlocation_runtime_state.weather_runtime_ready=1;auto p=dbPath();auto a=loadSql();if(!p.empty()&&a.ready()&&initDb(a,p))return;std::this_thread::sleep_for(std::chrono::milliseconds(250));}}void start(){if(!isTarget())return;bool e=false;if(gWorkerStarted.compare_exchange_strong(e,true))std::thread(worker).detach();}void onLib(const char*n,void*){miweatherlocation_runtime_state.library_callbacks++;if(isTarget()&&n&&(strstr(n,"libweather_app.so")||strstr(n,"libsqlite3.so")||strstr(n,"libmisqlite3.so")))start();}
 }
-
-std::string readExecutable() {
-    char buffer[256]{};
-    ssize_t n = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-    if (n <= 0 || static_cast<size_t>(n) >= sizeof(buffer)) return {};
-    buffer[n] = '\0';
-    return std::string(buffer);
-}
-
-std::string readProcessName() { return readSmallFile("/proc/self/cmdline", 256); }
-
-bool isTargetHyosProcess() {
-    return readExecutable() == kSpawnerPath && readProcessName() == kTargetPackage;
-}
-
-void fileLog(const char *message) {
-    static constexpr const char *paths[] = {
-            "/data/user_de/0/com.miui.weather2/cache/miweatherlocation_native.log",
-            "/data/user/0/com.miui.weather2/cache/miweatherlocation_native.log",
-            "/data/data/com.miui.weather2/cache/miweatherlocation_native.log",
-    };
-    for (const char *path : paths) {
-        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
-        if (fd < 0) continue;
-        size_t len = strnlen(message ? message : "", 2047);
-        (void)write(fd, message ? message : "", len);
-        (void)write(fd, "\n", 1);
-        close(fd);
-        return;
-    }
-}
-
-void logLine(int priority, const char *fmt, ...) {
-    char buffer[2048]{};
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buffer, sizeof(buffer), fmt, ap);
-    va_end(ap);
-    __android_log_write(priority, kTag, buffer);
-    fileLog(buffer);
-}
-
-struct FindLibraryContext { std::vector<std::string> needles; std::string path; };
-int findLibraryCallback(dl_phdr_info *info, size_t, void *data) {
-    auto *ctx = static_cast<FindLibraryContext *>(data);
-    if (!info || !info->dlpi_name || !info->dlpi_name[0]) return 0;
-    std::string path(info->dlpi_name);
-    for (const auto &needle : ctx->needles) {
-        if (path.find(needle) != std::string::npos) { ctx->path = path; return 1; }
-    }
-    return 0;
-}
-std::string findLoadedLibrary(std::initializer_list<const char *> names) {
-    FindLibraryContext ctx;
-    for (const char *name : names) ctx.needles.emplace_back(name);
-    dl_iterate_phdr(findLibraryCallback, &ctx);
-    return ctx.path;
-}
-
-struct sqlite3;
-struct sqlite3_stmt;
-struct SqliteApi {
-    using OpenV2 = int (*)(const char *, sqlite3 **, int, const char *);
-    using Close = int (*)(sqlite3 *);
-    using Exec = int (*)(sqlite3 *, const char *, int (*)(void *, int, char **, char **), void *, char **);
-    using ErrMsg = const char *(*)(sqlite3 *);
-    using PrepareV2 = int (*)(sqlite3 *, const char *, int, sqlite3_stmt **, const char **);
-    using Step = int (*)(sqlite3_stmt *);
-    using Finalize = int (*)(sqlite3_stmt *);
-    using BindText = int (*)(sqlite3_stmt *, int, const char *, int, void (*)(void *));
-    using ColumnInt = int (*)(sqlite3_stmt *, int);
-    using BusyTimeout = int (*)(sqlite3 *, int);
-    void *handle = nullptr; OpenV2 openV2 = nullptr; Close close = nullptr; Exec exec = nullptr;
-    ErrMsg errMsg = nullptr; PrepareV2 prepareV2 = nullptr; Step step = nullptr; Finalize finalize = nullptr;
-    BindText bindText = nullptr; ColumnInt columnInt = nullptr; BusyTimeout busyTimeout = nullptr;
-    bool ready() const { return handle && openV2 && close && exec && errMsg && prepareV2 && step && finalize && bindText && columnInt; }
-};
-
-void *resolveSymbol(void *handle, const char *name) {
-    void *symbol = dlsym(handle, name);
-    if (!symbol && handle != RTLD_DEFAULT) symbol = dlsym(RTLD_DEFAULT, name);
-    return symbol;
-}
-SqliteApi loadSqliteApi() {
-    SqliteApi api;
-    std::string path = findLoadedLibrary({"libsqlite3.so", "libmisqlite3.so"});
-    if (!path.empty()) {
-        api.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_NOLOAD);
-        if (!api.handle) api.handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
-    }
-    if (!api.handle) api.handle = dlopen("libsqlite3.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!api.handle) return api;
-    api.openV2 = reinterpret_cast<SqliteApi::OpenV2>(resolveSymbol(api.handle, "sqlite3_open_v2"));
-    api.close = reinterpret_cast<SqliteApi::Close>(resolveSymbol(api.handle, "sqlite3_close"));
-    api.exec = reinterpret_cast<SqliteApi::Exec>(resolveSymbol(api.handle, "sqlite3_exec"));
-    api.errMsg = reinterpret_cast<SqliteApi::ErrMsg>(resolveSymbol(api.handle, "sqlite3_errmsg"));
-    api.prepareV2 = reinterpret_cast<SqliteApi::PrepareV2>(resolveSymbol(api.handle, "sqlite3_prepare_v2"));
-    api.step = reinterpret_cast<SqliteApi::Step>(resolveSymbol(api.handle, "sqlite3_step"));
-    api.finalize = reinterpret_cast<SqliteApi::Finalize>(resolveSymbol(api.handle, "sqlite3_finalize"));
-    api.bindText = reinterpret_cast<SqliteApi::BindText>(resolveSymbol(api.handle, "sqlite3_bind_text"));
-    api.columnInt = reinterpret_cast<SqliteApi::ColumnInt>(resolveSymbol(api.handle, "sqlite3_column_int"));
-    api.busyTimeout = reinterpret_cast<SqliteApi::BusyTimeout>(resolveSymbol(api.handle, "sqlite3_busy_timeout"));
-    return api;
-}
-
-constexpr int SQLITE_OK = 0, SQLITE_ROW = 100, SQLITE_DONE = 101;
-constexpr int SQLITE_OPEN_READWRITE = 0x00000002, SQLITE_OPEN_FULLMUTEX = 0x00010000;
-bool bindText(const SqliteApi &api, sqlite3_stmt *stmt, int index, const char *value) {
-    return api.bindText(stmt, index, value, -1, reinterpret_cast<void (*)(void *)>(-1)) == SQLITE_OK;
-}
-int execSql(const SqliteApi &api, sqlite3 *db, const char *sql) {
-    int rc = api.exec(db, sql, nullptr, nullptr, nullptr);
-    miweatherlocation_runtime_state.last_sqlite_rc = rc;
-    if (rc != SQLITE_OK) logLine(ANDROID_LOG_ERROR, "sqlite exec rc=%d sql=%s err=%s", rc, sql, api.errMsg ? api.errMsg(db) : "unknown");
-    return rc;
-}
-bool tableExists(const SqliteApi &api, sqlite3 *db) {
-    sqlite3_stmt *stmt = nullptr;
-    if (api.prepareV2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='selectedcity' LIMIT 1", -1, &stmt, nullptr) != SQLITE_OK || !stmt) return false;
-    int rc = api.step(stmt); api.finalize(stmt); return rc == SQLITE_ROW;
-}
-int favoritePosition(const SqliteApi &api, sqlite3 *db) {
-    sqlite3_stmt *stmt = nullptr;
-    if (api.prepareV2(db, "SELECT position FROM selectedcity WHERE posID=? AND flag=0 LIMIT 1", -1, &stmt, nullptr) != SQLITE_OK || !stmt) return -1;
-    if (!bindText(api, stmt, 1, kPosId)) { api.finalize(stmt); return -1; }
-    int rc = api.step(stmt); int position = rc == SQLITE_ROW ? api.columnInt(stmt, 0) : -1; api.finalize(stmt); return position;
-}
-bool insertFavorite(const SqliteApi &api, sqlite3 *db) {
-    sqlite3_stmt *stmt = nullptr;
-    const char *sql = "INSERT INTO selectedcity (posID,flag,position,name,street_name,longtitude,latitude,belongings,extra,locale) VALUES (?,0,1,?,?,?,?,?,?,?)";
-    if (api.prepareV2(db, sql, -1, &stmt, nullptr) != SQLITE_OK || !stmt) return false;
-    bool ok = bindText(api, stmt, 1, kPosId) && bindText(api, stmt, 2, kName) && bindText(api, stmt, 3, kStreetName)
-            && bindText(api, stmt, 4, kLongitude) && bindText(api, stmt, 5, kLatitude) && bindText(api, stmt, 6, kBelongings)
-            && bindText(api, stmt, 7, kExtra) && bindText(api, stmt, 8, kLocale);
-    int rc = ok ? api.step(stmt) : -1; api.finalize(stmt); miweatherlocation_runtime_state.last_sqlite_rc = rc;
-    if (rc != SQLITE_DONE) { logLine(ANDROID_LOG_ERROR, "favorite insert rc=%d err=%s", rc, api.errMsg ? api.errMsg(db) : "unknown"); return false; }
-    return true;
-}
-std::string findWeatherDatabase() {
-    static constexpr const char *candidates[] = {"/data/user_de/0/com.miui.weather2/databases/weather.db", "/data/user/0/com.miui.weather2/databases/weather.db", "/data/data/com.miui.weather2/databases/weather.db"};
-    for (const char *path : candidates) if (access(path, R_OK | W_OK) == 0) return path;
-    return {};
-}
-bool ensureFavorite(const SqliteApi &api, const std::string &dbPath) {
-    sqlite3 *db = nullptr;
-    int rc = api.openV2(dbPath.c_str(), &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr);
-    miweatherlocation_runtime_state.last_sqlite_rc = rc;
-    if (rc != SQLITE_OK || !db) { if (db) api.close(db); return false; }
-    miweatherlocation_runtime_state.sqlite_ready = 1;
-    if (api.busyTimeout) api.busyTimeout(db, 3000);
-    if (!tableExists(api, db)) { api.close(db); return false; }
-    int existing = favoritePosition(api, db);
-    if (existing >= 0) {
-        miweatherlocation_runtime_state.favorite_present = 1;
-        logLine(ANDROID_LOG_INFO, "广州塔 already exists position=%d; real location untouched", existing);
-        api.close(db); return true;
-    }
-    bool success = false;
-    if (execSql(api, db, "BEGIN IMMEDIATE") == SQLITE_OK) {
-        if (execSql(api, db, "UPDATE selectedcity SET position=position+1 WHERE flag=0 AND position>=1") == SQLITE_OK && insertFavorite(api, db) && execSql(api, db, "COMMIT") == SQLITE_OK) success = favoritePosition(api, db) == 1;
-        if (!success) execSql(api, db, "ROLLBACK");
-    }
-    api.close(db);
-    if (success) {
-        miweatherlocation_runtime_state.favorite_present = 1;
-        miweatherlocation_runtime_state.favorite_inserted = 1;
-        logLine(ANDROID_LOG_INFO, "favorite injection OK name=广州塔 flag=0 position=1; flag=1 current location untouched");
-    }
-    return success;
-}
-
-void injectionWorker() {
-    miweatherlocation_runtime_state.worker_starts++;
-    logLine(ANDROID_LOG_INFO, "HYOS worker started exe=%s process=%s", readExecutable().c_str(), readProcessName().c_str());
-    for (int attempt = 1; attempt <= 240; ++attempt) {
-        miweatherlocation_runtime_state.last_attempt = static_cast<uint32_t>(attempt);
-        if (!isTargetHyosProcess()) return;
-        if (findLoadedLibrary({"libweather_app.so"}).empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(250)); continue; }
-        miweatherlocation_runtime_state.weather_runtime_ready = 1;
-        std::string dbPath = findWeatherDatabase();
-        SqliteApi sqlite = loadSqliteApi();
-        if (!dbPath.empty() && sqlite.ready()) {
-            if (ensureFavorite(sqlite, dbPath)) return;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    }
-}
-void ensureWorkerStarted() {
-    if (!isTargetHyosProcess()) return;
-    bool expected = false;
-    if (!gWorkerStarted.compare_exchange_strong(expected, true)) return;
-    std::thread(injectionWorker).detach();
-}
-void onLibraryLoaded(const char *name, void *) {
-    miweatherlocation_runtime_state.library_callbacks++;
-    if (!isTargetHyosProcess() || !name) return;
-    if (strstr(name, "libweather_app.so") || strstr(name, "libsqlite3.so") || strstr(name, "libmisqlite3.so")) ensureWorkerStarted();
-}
-
-}  // namespace
-
-extern "C" __attribute__((visibility("default"), used))
-NativeOnModuleLoaded native_init(const NativeAPIEntries *entries) {
-    miweatherlocation_runtime_state.native_init_calls++;
-    if (!entries || !entries->hook_func || !entries->unhook_func || !isTargetHyosProcess()) return nullptr;
-    miweatherlocation_runtime_state.target_matches++;
-    logLine(ANDROID_LOG_INFO, "native entry initialized in Weather HYOS child apiVersion=%u exe=%s process=%s", entries->version, readExecutable().c_str(), readProcessName().c_str());
-    ensureWorkerStarted();
-    return onLibraryLoaded;
-}
+extern "C" __attribute__((visibility("default"),used)) int miweatherlocation_toggle_current_favorite(){if(!isTarget())return-3;auto p=dbPath();auto a=loadSql();if(p.empty()||!a.ready())return-4;sqlite3*d=nullptr;if(a.o(p.c_str(),&d,RW|FULL,nullptr)!=OK||!d)return-5;if(a.bt)a.bt(d,3000);int r=table(a,d)?toggle(a,d):-6;a.c(d);return r;}
+extern "C" __attribute__((visibility("default"),used)) int miweatherlocation_refresh_current_favorite_state(){if(!isTarget())return-3;auto p=dbPath();auto a=loadSql();if(p.empty()||!a.ready())return-4;sqlite3*d=nullptr;if(a.o(p.c_str(),&d,RW|FULL,nullptr)!=OK||!d)return-5;if(a.bt)a.bt(d,3000);bool ok=table(a,d)&&refresh(a,d);a.c(d);return ok?0:-1;}
+extern "C" __attribute__((visibility("default"),used)) NativeOnModuleLoaded native_init(const NativeAPIEntries*e){miweatherlocation_runtime_state.native_init_calls++;if(!e||!e->hook_func||!e->unhook_func||!isTarget())return nullptr;miweatherlocation_runtime_state.target_matches++;start();return onLib;}
