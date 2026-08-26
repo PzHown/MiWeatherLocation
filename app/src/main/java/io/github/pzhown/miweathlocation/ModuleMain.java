@@ -156,7 +156,8 @@ public final class ModuleMain extends XposedModule {
         String detail = "packageIndex=" + packageIndex
                 + " binaryIndex=" + binaryIndex
                 + " original=" + originalBinary
-                + " proxy=" + proxyBinary;
+                + " proxy=" + proxyBinary
+                + " env=" + updatedEnv;
         bridgeLog(Log.INFO, "Weather Rust spawn intercepted " + detail);
         sendStatus("WEATHER_RUST_SPAWN_INTERCEPTED", detail);
         return updated;
@@ -212,19 +213,25 @@ public final class ModuleMain extends XposedModule {
         return parent == null ? null : new File(parent, PROXY_LIBRARY).getAbsolutePath();
     }
 
+    /** Mirrors DPIS' proven HyperOS RustProcess environment encoding. */
     private static String appendEnvironment(String existing, String key, String value) {
         StringBuilder builder = new StringBuilder();
         if (existing != null && !existing.trim().isEmpty()) {
             builder.append(existing.trim());
+            if (builder.charAt(builder.length() - 1) != ',') {
+                builder.append(',');
+            }
         }
-        if (builder.length() > 0) {
-            builder.append(" --envs=");
-        } else {
-            builder.append("--envs=");
-        }
-        builder.append(key).append('=').append(sanitize(value));
+        appendPair(builder, key, value);
         builder.append(" --cold-boot-speed");
         return builder.toString();
+    }
+
+    private static void appendPair(StringBuilder builder, String key, String value) {
+        if (builder.length() > 0) {
+            builder.append(" --envs=");
+        }
+        builder.append(key).append('=').append(sanitize(value));
     }
 
     private static String sanitize(String value) {
