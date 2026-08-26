@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: miweatherlocation-modern-rustprocess-${{ github.ref }}
+  group: miweatherlocation-hyos-native-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -39,20 +39,26 @@ jobs:
         with:
           gradle-version: '9.5.1'
 
-      - name: Build debug APK with HYOS sibling proxy
+      - name: Build direct HYOS native LSPosed APK
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Verify Modern API102 system_server packaging
+      - name: Verify Modern API102 native-only packaging
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           unzip -p "$APK" META-INF/xposed/java_init.list | grep -qx 'io.github.pzhown.miweathlocation.ModuleMain'
+          unzip -p "$APK" META-INF/xposed/native_init.list | tee native_init.list
+          grep -qx 'libmiweatherlocation.so' native_init.list
           unzip -p "$APK" META-INF/xposed/module.prop | tee module.prop
           grep -qx 'minApiVersion=102' module.prop
           grep -qx 'targetApiVersion=102' module.prop
           grep -qx 'staticScope=true' module.prop
           unzip -p "$APK" META-INF/xposed/scope.list | tee scope.list
-          grep -qx 'system' scope.list
           grep -qx 'com.miui.weather2' scope.list
+          test "$(grep -cve '^$' scope.list)" -eq 1
+          if grep -qxE 'system|android' scope.list; then
+            echo "system_server scope must not remain in the direct HYOS build" >&2
+            exit 1
+          fi
           if zipinfo -1 "$APK" | grep -qx 'assets/xposed_init'; then
             echo "Legacy assets/xposed_init must not be present" >&2
             exit 1
@@ -62,12 +68,12 @@ jobs:
             unzip -p "$APK" "$DEX" | strings
           done > dex-strings.txt
           grep -q 'io/github/pzhown/miweathlocation/ModuleMain' dex-strings.txt
-          grep -q 'android.os.RustProcessImpl' dex-strings.txt
-          grep -q 'onSystemServerStarting' dex-strings.txt
-          grep -q 'WEATHER_PROXY_NOT_DEPLOYED' dex-strings.txt
-          grep -q 'WEATHER_RUST_SPAWN_INTERCEPTED' dex-strings.txt
+          if grep -q 'android.os.RustProcessImpl' dex-strings.txt; then
+            echo "RustProcessImpl system_server bridge unexpectedly remains" >&2
+            exit 1
+          fi
 
-      - name: Verify proxy symbols dependencies and 16 KB ELF alignment
+      - name: Verify native entry and 16 KB ELF alignment
         run: |
           APK="app/build/outputs/apk/debug/app-debug.apk"
           unzip -p "$APK" lib/arm64-v8a/libmiweatherlocation.so > /tmp/libmiweatherlocation.so
@@ -76,17 +82,14 @@ jobs:
           READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           ZIPALIGN="$ANDROID_HOME/build-tools/37.0.0/zipalign"
           "$NM" -D /tmp/libmiweatherlocation.so | tee native-symbols.txt
-          grep -q ' JNI_OnLoad$' native-symbols.txt
           grep -q ' native_init$' native-symbols.txt
-          grep -q ' app_entry_point$' native-symbols.txt
-          grep -q ' hy_app_init$' native-symbols.txt
-          if grep -q 'zygisk_module_entry' native-symbols.txt; then
-            echo "Unexpected Zygisk entrypoint remains" >&2
+          if grep -qE ' app_entry_point$| hy_app_init$|zygisk_module_entry' native-symbols.txt; then
+            echo "Old sibling-proxy/Zygisk entrypoint unexpectedly remains" >&2
             exit 1
           fi
           "$READELF" -dW /tmp/libmiweatherlocation.so | tee elf-dynamic.txt
           if grep -q 'libc++_shared.so' elf-dynamic.txt; then
-            echo "HYOS proxy unexpectedly depends on libc++_shared.so" >&2
+            echo "Native payload unexpectedly depends on libc++_shared.so" >&2
             exit 1
           fi
           "$READELF" -lW /tmp/libmiweatherlocation.so | tee elf-program-headers.txt
@@ -127,5 +130,5 @@ jobs:
             MiWeatherLocation-debug.apk \
             --target "$GITHUB_SHA" \
             --prerelease \
-            --title "MiWeatherLocation Modern HyperOS RustProcess debug latest" \
-            --notes "Single APK. Modern libxposed API 102 loads in system_server and hooks android.os.RustProcessImpl.startRustProcess. The app can use root to deploy libmiweatherlocation.so as a sibling of Xiaomi Weather's libweather_app.so, matching the proven HyperOS Rust proxy pattern. No separate Magisk/Zygisk module."
+            --title "MiWeatherLocation HyperOS HYOS native debug latest" \
+            --notes "Single APK, pure LSPosed API102 native_init path. The native payload is loaded directly in Xiaomi Weather's hyos_spawner child, matching working HyperOS 4 native-only modules. No system_server hook, sibling proxy deployment, or separate Magisk/Zygisk module."
