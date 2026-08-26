@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.4.1-modern-systemserver-alpha"
+        versionCode = 14
+        versionName = "0.4.2-modern-systemserver-alpha"
 
         ndk {
             abiFilters += "arm64-v8a"
