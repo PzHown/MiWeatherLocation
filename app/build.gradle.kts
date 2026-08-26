@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "0.3.1-lsposed-legacy-bootstrap"
+        versionCode = 11
+        versionName = "0.3.2-lsposed-fork-probe"
 
         ndk {
             abiFilters += "arm64-v8a"
