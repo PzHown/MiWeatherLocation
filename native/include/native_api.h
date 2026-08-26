@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdarg>
 
 typedef int (*HookFunType)(void *func, void *replace, void **backup);
 typedef int (*UnhookFunType)(void *func);
