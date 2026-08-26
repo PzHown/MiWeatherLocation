@@ -12,11 +12,18 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "0.3.2-lsposed-fork-probe"
+        versionCode = 12
+        versionName = "0.4.0-rustprocess-proxy-alpha"
 
         ndk {
             abiFilters += "arm64-v8a"
+        }
+        externalNativeBuild {
+            cmake {
+                // hyos_spawner loads the proxy before Weather's own libraries,
+                // so avoid a dependency on a separately discoverable libc++_shared.so.
+                arguments += "-DANDROID_STL=c++_static"
+            }
         }
     }
 
