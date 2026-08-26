@@ -3,6 +3,7 @@
 #include <jni.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
@@ -52,9 +53,6 @@ extern "C" jint JNI_OnLoad(JavaVM*, void*);
 void triggerDatabaseWorker() {
     bool expected = false;
     if (!gWorkerTriggered.compare_exchange_strong(expected, true)) return;
-    // The existing JNI_OnLoad implementation does not use JavaVM and starts
-    // the Weather-native DB worker. hyos_spawner loads this library as a Rust
-    // binary rather than a JNI library, so invoke it explicitly once.
     JNI_OnLoad(nullptr, nullptr);
 }
 
