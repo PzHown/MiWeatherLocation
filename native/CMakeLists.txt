@@ -7,7 +7,6 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_library(miweatherlocation SHARED
     src/main.cpp
-    src/proxy_entry.cpp
 )
 
 target_include_directories(miweatherlocation PRIVATE include)
@@ -20,8 +19,7 @@ target_compile_options(miweatherlocation PRIVATE
     -fvisibility-inlines-hidden
 )
 
-# Android 15+ devices may use 16 KB memory pages. Keep every LOAD segment
-# directly loadable on Android 17 / HyperOS 4.
+# Android 15+ / Android 17 devices may use 16 KB memory pages.
 target_link_options(miweatherlocation PRIVATE
     "-Wl,-z,max-page-size=16384"
     "-Wl,-z,common-page-size=16384"
