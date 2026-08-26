@@ -10,8 +10,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1-diagnostic"
+        versionCode = 3
+        versionName = "0.1.2-diagnostic"
     }
 
     compileOptions {
@@ -29,4 +29,5 @@ android {
 
 dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
+    implementation("io.github.libxposed:service:102.0.0")
 }
