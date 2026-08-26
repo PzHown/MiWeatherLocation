@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: miweatherlocation-${{ github.ref }}
+  group: miweatherlocation-lsposed-native-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
