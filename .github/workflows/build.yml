@@ -17,31 +17,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with: { distribution: temurin, java-version: '21' }
+      - uses: android-actions/setup-android@v3
       - name: Install Android SDK, NDK and CMake
         run: |
           sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
-
-      - name: Set up Gradle 9.5.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.5.1'
-
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '9.5.1' }
       - name: Build APK
         run: gradle --no-daemon :app:assembleDebug
-
       - name: Verify LSPosed HYOS native APK
         run: |
           APK=app/build/outputs/apk/debug/app-debug.apk
@@ -53,26 +40,24 @@ jobs:
           unzip -p "$APK" META-INF/xposed/native_init.list | grep -qx 'libmiweatherlocation.so'
           unzip -p "$APK" META-INF/xposed/scope.list | grep -qx 'com.miui.weather2'
           SO=$(find app/build/intermediates/cxx/Debug -type f -name 'libmiweatherlocation.so' | head -n 1)
-          test -n "$SO" && test -s "$SO"
           NM="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           READELF="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           "$NM" -D "$SO" | tee native-symbols.txt
           grep -q ' native_init$' native-symbols.txt
+          grep -q ' miweatherlocation_runtime_state$' native-symbols.txt
+          grep -q ' miweatherlocation_toggle_current_favorite$' native-symbols.txt
+          grep -q ' miweatherlocation_refresh_current_favorite_state$' native-symbols.txt
           "$READELF" -lW "$SO" > native-elf-program-headers.txt
           python3 - <<'PY'
           import re
           from pathlib import Path
-          text = Path('native-elf-program-headers.txt').read_text()
-          aligns = []
+          text=Path('native-elf-program-headers.txt').read_text(); aligns=[]
           for line in text.splitlines():
-              if re.match(r'^\s*LOAD\s', line):
-                  m = re.search(r'(0x[0-9a-fA-F]+)\s*$', line)
-                  if m:
-                      aligns.append(int(m.group(1), 16))
-          if not aligns or any(a < 0x4000 for a in aligns):
-              raise SystemExit(f'Bad ELF LOAD alignment: {[hex(a) for a in aligns]}')
+              if re.match(r'^\s*LOAD\s',line):
+                  m=re.search(r'(0x[0-9a-fA-F]+)\s*$',line)
+                  if m: aligns.append(int(m.group(1),16))
+          if not aligns or any(a<0x4000 for a in aligns): raise SystemExit(aligns)
           PY
-
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
