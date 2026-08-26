@@ -15,8 +15,6 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.util.List;
 
 import io.github.libxposed.service.XposedService;
@@ -24,9 +22,7 @@ import io.github.libxposed.service.XposedService;
 public final class MainActivity extends Activity {
     private static final String WEATHER = "com.miui.weather2";
     private static final int PER_USER_RANGE = 100000;
-
     private TextView output;
-    private volatile String nativeStatus = "Native status: loading...\n";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -43,14 +39,9 @@ public final class MainActivity extends Activity {
         root.addView(title);
 
         TextView hint = new TextView(this);
-        hint.setText("Weather 18 是 hasCode=false 的 HyperOS Native/Rust 应用。主实现已切换为 Zygisk Native；LSPosed 信息仅保留用于对照诊断。");
+        hint.setText("纯 LSPosed 单 APK 版本。Native payload 已内置在 APK，不需要另外刷 Magisk / Zygisk 模块。目标仍是只添加广州塔收藏城市，不修改真实定位。");
         hint.setPadding(0, dp(8), 0, dp(12));
         root.addView(hint);
-
-        Button nativeConfig = new Button(this);
-        nativeConfig.setText("Native 配置 / 日志");
-        nativeConfig.setOnClickListener(v -> startActivity(new Intent(this, NativeConfigActivity.class)));
-        root.addView(nativeConfig);
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -62,7 +53,7 @@ public final class MainActivity extends Activity {
 
         Button refresh = new Button(this);
         refresh.setText("刷新状态");
-        refresh.setOnClickListener(v -> refreshAll());
+        refresh.setOnClickListener(v -> refreshDiagnostics());
         row.addView(refresh, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(row);
 
@@ -79,30 +70,25 @@ public final class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.addView(output);
         root.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f));
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
-        refreshAll();
+        refreshDiagnostics();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        refreshAll();
-    }
-
-    private void refreshAll() {
         refreshDiagnostics();
-        refreshNativeStatus();
     }
 
     private void refreshDiagnostics() {
         StringBuilder sb = new StringBuilder();
         int moduleUid = Process.myUid();
         int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: 0.2.0-native-alpha\n");
+        sb.append("App version: 0.3.0-lsposed-native-alpha\n");
+        sb.append("Architecture: pure LSPosed APK + embedded arm64 native payload\n");
+        sb.append("Magisk module required: false\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE)
                 .append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\n");
         sb.append("Current userId: ").append(userId).append('\n');
@@ -113,63 +99,55 @@ public final class MainActivity extends Activity {
 
         XposedService service = App.getService();
         if (service == null) {
-            sb.append("Legacy LSPosed service: NOT CONNECTED\n");
-        } else {
-            try {
-                sb.append("Legacy LSPosed service: CONNECTED\n");
-                sb.append("Framework: ").append(service.getFrameworkName())
-                        .append(' ').append(service.getFrameworkVersion()).append('\n');
-                sb.append("API: ").append(service.getApiVersion()).append('\n');
-                List<String> scope = service.getScope();
-                sb.append("Legacy scope: ").append(scope).append('\n');
-                if (service.getApiVersion() >= 102) {
-                    var targets = service.getRunningTargets();
-                    sb.append("Legacy running targets: ").append(targets.size()).append('\n');
-                    for (var target : targets) {
-                        sb.append(" - ").append(target.getProcessName())
-                                .append(" pid=").append(target.getPid())
-                                .append(" state=").append(target.getState())
-                                .append('\n');
-                    }
-                }
-            } catch (Throwable t) {
-                sb.append("Legacy LSPosed diagnostic error: ")
-                        .append(t.getClass().getSimpleName()).append(": ")
-                        .append(t.getMessage()).append('\n');
-            }
+            sb.append("Xposed Service: NOT CONNECTED\n");
+            sb.append("Conclusion: LSPosed has not connected to the module app yet.\n");
+            output.setText(sb.toString());
+            return;
         }
 
-        sb.append('\n').append(nativeStatus);
-        output.setText(sb.toString());
-    }
+        try {
+            sb.append("Xposed Service: CONNECTED\n");
+            sb.append("Framework: ").append(service.getFrameworkName())
+                    .append(' ').append(service.getFrameworkVersion()).append('\n');
+            sb.append("Framework code: ").append(service.getFrameworkVersionCode()).append('\n');
+            sb.append("API: ").append(service.getApiVersion()).append('\n');
+            List<String> scope = service.getScope();
+            sb.append("Scope: ").append(scope).append('\n');
+            sb.append("Scope contains weather: ").append(scope.contains(WEATHER)).append('\n');
 
-    private void refreshNativeStatus() {
-        new Thread(() -> {
-            String command = "echo '=== Native module ==='; "
-                    + "if [ -f /data/adb/modules/miweatherlocation/module.prop ]; then "
-                    + "cat /data/adb/modules/miweatherlocation/module.prop; else echo 'not installed'; fi; "
-                    + "echo '=== Weather process ==='; pidof com.miui.weather2 || true; "
-                    + "echo '=== Config ==='; cat /data/adb/miweatherlocation/config.properties 2>/dev/null || echo 'config missing'; "
-                    + "echo '=== Latest native log ==='; "
-                    + "for F in /data/user_de/0/com.miui.weather2/files/miweatherlocation_native.log /data/user/0/com.miui.weather2/files/miweatherlocation_native.log; do "
-                    + "if [ -f \"$F\" ]; then echo \"--- $F ---\"; tail -n 40 \"$F\"; fi; done";
-            StringBuilder result = new StringBuilder("Native status:\n");
-            try {
-                java.lang.Process proc = Runtime.getRuntime().exec(new String[]{"su", "-c", command});
-                try (BufferedReader reader = new BufferedReader(new InputStreamReader(proc.getInputStream()));
-                     BufferedReader error = new BufferedReader(new InputStreamReader(proc.getErrorStream()))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) result.append(line).append('\n');
-                    while ((line = error.readLine()) != null) result.append("stderr: ").append(line).append('\n');
+            boolean weatherLoaded = false;
+            if (service.getApiVersion() >= 102) {
+                var targets = service.getRunningTargets();
+                sb.append("Running targets count: ").append(targets.size()).append('\n');
+                for (var target : targets) {
+                    sb.append(" - ").append(target.getProcessName())
+                            .append(" pid=").append(target.getPid())
+                            .append(" uid=").append(target.getUid())
+                            .append(" state=").append(target.getState())
+                            .append(" loadedVersionCode=").append(target.getLoadedModuleVersionCode())
+                            .append('\n');
+                    String process = target.getProcessName();
+                    if (WEATHER.equals(process) || process.startsWith(WEATHER + ":")) {
+                        weatherLoaded = true;
+                    }
                 }
-                result.append("exitCode=").append(proc.waitFor()).append('\n');
-            } catch (Throwable t) {
-                result.append("root status error: ").append(t.getClass().getSimpleName())
-                        .append(": ").append(t.getMessage()).append('\n');
             }
-            nativeStatus = result.toString();
-            runOnUiThread(this::refreshDiagnostics);
-        }, "MiWeatherLocation-NativeStatus").start();
+
+            sb.append("Weather LSPosed target present: ").append(weatherLoaded).append("\n\n");
+            if (weatherLoaded) {
+                sb.append("Conclusion: LSPosed loaded this module into Xiaomi Weather. ")
+                        .append("The embedded native payload is eligible to run even though Weather 18 hasCode=false.\n");
+            } else {
+                sb.append("Conclusion: Xiaomi Weather still is not a Running Target. ")
+                        .append("If this remains false after force-stop/relaunch, the blocker is LSPosed process injection/scope resolution before our Java/native payload can run.\n");
+            }
+        } catch (Throwable t) {
+            sb.append("LSPosed diagnostic error: ")
+                    .append(t.getClass().getSimpleName()).append(": ")
+                    .append(t.getMessage()).append('\n');
+        }
+
+        output.setText(sb.toString());
     }
 
     private void appendPackageInfo(StringBuilder sb, String label, String packageName) {
