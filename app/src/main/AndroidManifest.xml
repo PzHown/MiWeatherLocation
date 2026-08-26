@@ -7,28 +7,15 @@
     <application
         android:name=".App"
         android:allowBackup="false"
+        android:extractNativeLibs="true"
         android:label="MiWeatherLocation"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="HyperOS 4 RustProcess system_server hook + embedded Weather native proxy" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="82" />
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@array/xposed_scope" />
 
         <receiver
             android:name=".HookStatusReceiver"
             android:exported="true">
             <intent-filter>
-                <action android:name="io.github.pzhown.miweathlocation.LEGACY_BOOTSTRAP_LOADED" />
                 <action android:name="io.github.pzhown.miweathlocation.RUSTPROCESS_STATUS" />
             </intent-filter>
         </receiver>
