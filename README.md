@@ -1,60 +1,105 @@
 # MiWeatherLocation
 
-面向小米天气的 LSPosed 定位覆写模块。
+面向小米天气的 **LSPosed API 102 / libxposed 新 API** 定位覆写模块。
 
 ## 当前版本
 
-第一版是验证性 PoC：仅作用于 `com.miui.weather2`，将小米天气进程获取到的位置固定覆写为 **广州塔**。
+第一版是验证性 PoC：仅作用于 `com.miui.weather2`，将小米天气进程读取到的位置固定覆写为 **广州塔**。
 
 - 目标应用：小米天气 `com.miui.weather2`
 - 已针对版本：`18.0.0.18-R` / versionCode `180000180`
+- LSPosed API：`102`
+- libxposed：`io.github.libxposed:api:102.0.0`
 - 固定地点：广州塔
 - 高德坐标（GCJ-02）：`23.106428, 113.324521`
 - 地址：广东省广州市海珠区阅江西路 222 号
 
-广州塔参考：https://ditu.amap.com/place/B00140WBI1
+## API 102
 
-## 工作方式
+项目不使用 legacy `de.robv.android.xposed` API，也不包含 `assets/xposed_init`。
 
-模块只加载进小米天气进程，不修改系统全局定位。
+模块入口与作用域使用 libxposed 新格式：
 
-PoC 会：
+```text
+META-INF/xposed/java_init.list
+META-INF/xposed/module.prop
+META-INF/xposed/scope.list
+```
 
-1. Hook `android.location.Location#getLatitude()` / `getLongitude()`；
-2. Hook `Location#setLatitude()` / `setLongitude()`，将写入坐标固定为广州塔；
-3. 在 `Location#writeToParcel()` 前再次固定坐标，覆盖部分跨层传递场景；
-4. 若检测到 `com.amap.api.location.AMapLocation`，同步覆写常用行政区、街道与 POI getter，避免坐标已经到广州塔但文字仍是原地点。
+`module.prop`：
+
+```properties
+minApiVersion=102
+targetApiVersion=102
+staticScope=true
+autoHotReload=true
+```
+
+## 当前 Hook
+
+PoC 当前优先验证定位读取链：
+
+1. API 102 `XposedModule#onPackageReady` 中安装 Hook；
+2. Hook `android.location.Location#getLatitude()`，固定返回 `23.106428`；
+3. Hook `android.location.Location#getLongitude()`，固定返回 `113.324521`；
+4. 如果目标进程存在 `com.amap.api.location.AMapLocation`，同步覆写省、市、区、街道、POI、地址等 getter；
+5. 静态作用域只包含 `com.miui.weather2`，不会全局修改其他 App 定位。
 
 ## 使用
 
-1. 安装 GitHub Actions 产出的 APK；
-2. 在 LSPosed 中启用模块；
-3. 作用域仅勾选 **天气 / `com.miui.weather2`**；
-4. 强制停止小米天气后重新打开；
-5. 在天气中刷新“当前位置”。
+1. 从 GitHub Actions 下载 `MiWeatherLocation-debug` APK；
+2. 安装 APK；
+3. 在支持 libxposed API 102 的 LSPosed 中启用模块；
+4. 作用域确认只有 **天气 / `com.miui.weather2`**；
+5. 强制停止并重新打开小米天气；
+6. 刷新当前定位。
 
-ADB 可用于快速重启：
+快速重启：
 
 ```bash
 adb shell am force-stop com.miui.weather2
 adb shell monkey -p com.miui.weather2 1
 ```
 
+## 调试
+
+模块日志 TAG：
+
+```text
+MiWeatherLocation
+```
+
+可以通过 LSPosed 日志确认是否出现：
+
+```text
+Hooks installed for com.miui.weather2 -> Canton Tower 23.106428,113.324521
+```
+
+以及是否检测到了 `AMapLocation`。
+
+## 构建链
+
+按当前 libxposed 官方 example 对齐：
+
+- Android Gradle Plugin `9.2.1`
+- Gradle `9.5.1`
+- JDK `21`
+- compileSdk `37`
+- libxposed API `102.0.0`
+
+GitHub Actions 每次 push 自动构建 Debug APK。
+
 ## 当前限制
 
-- 第一版坐标写死为广州塔，没有配置界面；
-- 目标是验证小米天气 18.x 的定位链路，不处理“收藏城市”数据库；
-- 如果小米天气某条 native/Rust 路径完全绕过 Android/AMap Java getter，后续需要针对该路径补 Hook；
-- GCJ-02 与 WGS84 路径可能需要分别处理，PoC 目前优先针对中国大陆小米天气常见的 AMap 路径。
+- 坐标暂时写死为广州塔，没有配置界面；
+- 当前只验证小米天气定位链，不操作收藏城市数据库；
+- 如果 18.x 的 Rust/native 定位路径绕过 Android/AMap Java getter，需要根据日志和实机结果继续补 Hook；
+- 后续再区分 GCJ-02 / WGS84 以及 AMap / NLP / GMS 路径。
 
 ## 后续计划
 
-- [ ] 验证 18.0.0.18-R 的 AMap / NLP / GMS 三条定位链
-- [ ] 增加经纬度自定义
-- [ ] 增加地点搜索与小米 `/location/city/geo` 解析
-- [ ] 支持街道/景区级固定地点
-- [ ] 增加启用状态与调试日志页面
-
-## 构建
-
-仓库通过 GitHub Actions 自动构建可直接安装的 Debug APK。
+- [ ] 实机验证小米天气 18.0.0.18-R
+- [ ] 针对未命中的 native/Rust 路径补 Hook
+- [ ] 增加经纬度和地点名称自定义
+- [ ] 接入小米 `/location/city/geo`
+- [ ] 支持街道、景区级固定地点
