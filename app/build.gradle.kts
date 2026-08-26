@@ -4,7 +4,8 @@ plugins {
 
 android {
     namespace = "io.github.pzhown.miweathlocation"
-    compileSdk = 36
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "io.github.pzhown.miweathlocation"
