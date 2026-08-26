@@ -6,6 +6,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: miweatherlocation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,9 +40,36 @@ jobs:
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: MiWeatherLocation-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+      - name: Verify modern Xposed metadata
+        run: |
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          echo "=== META-INF/xposed ==="
+          unzip -l "$APK" | grep 'META-INF/xposed/'
+          echo "=== module.prop ==="
+          unzip -p "$APK" META-INF/xposed/module.prop
+          echo "=== java_init.list ==="
+          unzip -p "$APK" META-INF/xposed/java_init.list
+          echo "=== scope.list ==="
+          unzip -p "$APK" META-INF/xposed/scope.list
+          unzip -l "$APK" | grep -q 'META-INF/xposed/module.prop'
+          unzip -l "$APK" | grep -q 'META-INF/xposed/java_init.list'
+          unzip -l "$APK" | grep -q 'META-INF/xposed/scope.list'
+          for DEX in $(zipinfo -1 "$APK" | grep -E '^classes([0-9]+)?\.dex$'); do
+            unzip -p "$APK" "$DEX" | strings
+          done | grep -q 'Lio/github/pzhown/miweathlocation/ModuleMain;'
+
+      - name: Prepare direct APK asset
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: cp app/build/outputs/apk/debug/app-debug.apk MiWeatherLocation-debug.apk
+
+      - name: Publish direct APK to debug-latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete debug-latest --yes --cleanup-tag || true
+          gh release create debug-latest MiWeatherLocation-debug.apk \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "MiWeatherLocation debug latest" \
+            --notes "Automatically built from main. Direct APK download; no Actions artifact ZIP."
