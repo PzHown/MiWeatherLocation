@@ -1,105 +1,107 @@
 # MiWeatherLocation
 
-面向小米天气的 **LSPosed API 102 / libxposed 新 API** 定位覆写模块。
+面向小米天气的 LSPosed 模块，基于 **libxposed API 102**。
 
 ## 当前版本
 
-第一版是验证性 PoC：仅作用于 `com.miui.weather2`，将小米天气进程读取到的位置固定覆写为 **广州塔**。
+第一版目标已经调整为：**不修改真实位置，不伪造系统定位，只把“广州塔”作为第一个收藏城市插入小米天气。**
+
+预期顺序：
+
+```text
+当前位置（真实定位）
+广州塔（收藏城市）
+原收藏城市 1
+原收藏城市 2
+...
+```
 
 - 目标应用：小米天气 `com.miui.weather2`
 - 已针对版本：`18.0.0.18-R` / versionCode `180000180`
-- LSPosed API：`102`
-- libxposed：`io.github.libxposed:api:102.0.0`
-- 固定地点：广州塔
-- 高德坐标（GCJ-02）：`23.106428, 113.324521`
-- 地址：广东省广州市海珠区阅江西路 222 号
+- libxposed API：`102.0.0`
+- 收藏地点：广州塔
+- 坐标：`23.106428, 113.324521`
+- `flag=0`
+- `position=1`
+- 当前位置 `flag=1 / position=0` 完全不修改
 
-## API 102
+## 工作方式
 
-项目不使用 legacy `de.robv.android.xposed` API，也不包含 `assets/xposed_init`。
+模块只加载进 `com.miui.weather2`。
 
-模块入口与作用域使用 libxposed 新格式：
+在小米天气 Application 启动后，模块打开设备加密区数据库：
 
 ```text
-META-INF/xposed/java_init.list
-META-INF/xposed/module.prop
-META-INF/xposed/scope.list
+/data/user_de/0/com.miui.weather2/databases/weather.db
 ```
 
-`module.prop`：
+检查 `selectedcity` 表：
 
-```properties
-minApiVersion=102
-targetApiVersion=102
-staticScope=true
-autoHotReload=true
+1. 如果广州塔已经存在，不做任何修改；
+2. 如果不存在，将现有 `flag=0` 且 `position>=1` 的收藏城市统一后移一位；
+3. 插入广州塔为：
+
+```text
+flag        = 0
+position    = 1
+name        = 广州塔
+street_name = 阅江西路
+latitude    = 23.106428
+longtitude  = 113.324521
+belongings  = 广州市, 广东, 中国
+extra       = weathercn:101280108
+locale      = zh_cn
 ```
 
-## 当前 Hook
+这样真实定位仍由系统正常提供，小米天气的“当前位置”不会被替换。
 
-PoC 当前优先验证定位读取链：
+## 为什么先用海珠区 weather key
 
-1. API 102 `XposedModule#onPackageReady` 中安装 Hook；
-2. Hook `android.location.Location#getLatitude()`，固定返回 `23.106428`；
-3. Hook `android.location.Location#getLongitude()`，固定返回 `113.324521`；
-4. 如果目标进程存在 `com.amap.api.location.AMapLocation`，同步覆写省、市、区、街道、POI、地址等 getter；
-5. 静态作用域只包含 `com.miui.weather2`，不会全局修改其他 App 定位。
+小米天气的收藏城市记录除了显示名称、经纬度外，还需要 `extra` 天气 location key。第一版先复用海珠区的：
+
+```text
+weathercn:101280108
+```
+
+因此天气数据仍对应广州海珠区，但 UI 收藏名称和坐标是广州塔。后续可以继续逆向更细粒度地点是否有独立 key，或改成动态地点解析。
 
 ## 使用
 
-1. 从 GitHub Actions 下载 `MiWeatherLocation-debug` APK；
-2. 安装 APK；
-3. 在支持 libxposed API 102 的 LSPosed 中启用模块；
-4. 作用域确认只有 **天气 / `com.miui.weather2`**；
-5. 强制停止并重新打开小米天气；
-6. 刷新当前定位。
+1. 安装 GitHub Actions 产出的 APK；
+2. 在 LSPosed 中启用模块；
+3. 作用域只勾选“小米天气 / `com.miui.weather2`”；
+4. 强制停止小米天气；
+5. 重新打开小米天气。
 
-快速重启：
+ADB：
 
 ```bash
 adb shell am force-stop com.miui.weather2
 adb shell monkey -p com.miui.weather2 1
 ```
 
-## 调试
+验证：
 
-模块日志 TAG：
-
-```text
-MiWeatherLocation
+```bash
+adb shell content query --uri content://weather/selected_city
 ```
 
-可以通过 LSPosed 日志确认是否出现：
+预期广州塔是 `flag=0, position=1`，而真实位置仍是 `flag=1, position=0`。
 
-```text
-Hooks installed for com.miui.weather2 -> Canton Tower 23.106428,113.324521
-```
+## 技术栈
 
-以及是否检测到了 `AMapLocation`。
-
-## 构建链
-
-按当前 libxposed 官方 example 对齐：
-
-- Android Gradle Plugin `9.2.1`
-- Gradle `9.5.1`
-- JDK `21`
-- compileSdk `37`
 - libxposed API `102.0.0`
-
-GitHub Actions 每次 push 自动构建 Debug APK。
-
-## 当前限制
-
-- 坐标暂时写死为广州塔，没有配置界面；
-- 当前只验证小米天气定位链，不操作收藏城市数据库；
-- 如果 18.x 的 Rust/native 定位路径绕过 Android/AMap Java getter，需要根据日志和实机结果继续补 Hook；
-- 后续再区分 GCJ-02 / WGS84 以及 AMap / NLP / GMS 路径。
+- `XposedModule`
+- `onPackageReady()`
+- `hook(...).intercept(...)`
+- `META-INF/xposed/java_init.list`
+- 静态作用域 `com.miui.weather2`
 
 ## 后续计划
 
-- [ ] 实机验证小米天气 18.0.0.18-R
-- [ ] 针对未命中的 native/Rust 路径补 Hook
-- [ ] 增加经纬度和地点名称自定义
+- [ ] 验证 18.0.0.18-R 是否会主动覆盖 `selectedcity`
+- [ ] 支持自定义地点
+- [ ] 支持地点搜索
 - [ ] 接入小米 `/location/city/geo`
-- [ ] 支持街道、景区级固定地点
+- [ ] 支持广州塔、卡伦海滩等景区/街道级收藏
+- [ ] 配置页与调试日志
