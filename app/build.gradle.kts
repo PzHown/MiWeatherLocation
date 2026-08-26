@@ -11,8 +11,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.5-deep-probe"
+        versionCode = 7
+        versionName = "0.1.6-zygisknext-probe"
     }
 
     compileOptions {
