@@ -7,18 +7,10 @@
     <application
         android:name=".App"
         android:allowBackup="false"
-        android:extractNativeLibs="true"
+        android:extractNativeLibs="false"
         android:label="MiWeatherLocation"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
-
-        <receiver
-            android:name=".HookStatusReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="io.github.pzhown.miweathlocation.RUSTPROCESS_STATUS" />
-            </intent-filter>
-        </receiver>
 
         <activity
             android:name=".MainActivity"
