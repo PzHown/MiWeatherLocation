@@ -15,8 +15,6 @@ target_compile_options(miweatherlocation PRIVATE
     -Wall
     -Wextra
     -Werror=return-type
-    -include
-    cstdarg
     -fvisibility=hidden
     -fvisibility-inlines-hidden
 )
@@ -27,5 +25,12 @@ target_link_options(miweatherlocation PRIVATE
 
 find_library(log-lib log)
 find_library(dl-lib dl)
+find_library(egl-lib EGL)
+find_library(gles-lib GLESv2)
 
-target_link_libraries(miweatherlocation PRIVATE ${log-lib} ${dl-lib})
+target_link_libraries(miweatherlocation PRIVATE
+    ${log-lib}
+    ${dl-lib}
+    ${egl-lib}
+    ${gles-lib}
+)
