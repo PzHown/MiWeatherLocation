@@ -53,7 +53,7 @@ public final class MainActivity extends Activity {
 
     private void refreshDiagnostics() {
         StringBuilder sb = new StringBuilder(); int moduleUid = Process.myUid(); int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: ").append(BuildConfig.VERSION_NAME).append('\n');
+        sb.append("App version: ").append(appVersionName()).append('\n');
         sb.append("Architecture: LSPosed HYOS-spawner native_init -> Weather child\n");
         sb.append("Star UI: independent Native GL button; does not modify city title text\n");
         sb.append("Favorite radius: 2000m\nSeparate Magisk/Zygisk module required: false\nRoot required for module function: false\nRoot used by this UI only for diagnostics / old-proxy cleanup\n16 KB ELF alignment: enabled\n");
@@ -72,6 +72,15 @@ public final class MainActivity extends Activity {
             }
         } catch (Throwable t) { sb.append("LSPosed service diagnostic error: ").append(t).append('\n'); }
         sb.append('\n').append(probeText).append('\n').append(cleanupText); output.setText(sb.toString());
+    }
+
+    private String appVersionName() {
+        try {
+            String version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            return version == null ? "unknown" : version;
+        } catch (Throwable t) {
+            return "unknown";
+        }
     }
 
     private void appendPackageInfo(StringBuilder sb) {
