@@ -11,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -62,6 +63,12 @@ constexpr int kActionDown = 0;
 constexpr int kActionUp = 1;
 constexpr int kActionCancel = 3;
 
+constexpr int SQLITE_OK = 0;
+constexpr int SQLITE_ROW = 100;
+constexpr int SQLITE_DONE = 101;
+constexpr int SQLITE_OPEN_READWRITE = 0x00000002;
+constexpr int SQLITE_OPEN_FULLMUTEX = 0x00010000;
+
 struct sqlite3;
 struct sqlite3_stmt;
 
@@ -95,18 +102,15 @@ struct SqliteApi {
     }
 };
 
-constexpr int SQLITE_OK = 0;
-constexpr int SQLITE_ROW = 100;
-constexpr int SQLITE_DONE = 101;
-constexpr int SQLITE_OPEN_READWRITE = 0x00000002;
-constexpr int SQLITE_OPEN_FULLMUTEX = 0x00010000;
-
 using ActionMaskedFn = int (*)(void *event);
 using RawCoordinateFn = float (*)(void *event, int pointerIndex);
 
 std::atomic<bool> gThreadStarted{false};
 std::atomic<bool> gHookInstalled{false};
 std::atomic<bool> gToggleInFlight{false};
+std::atomic<uint32_t> gTouchDownCount{0};
+std::atomic<uint32_t> gTouchUpCount{0};
+std::atomic<uint32_t> gHitCount{0};
 ActionMaskedFn gOriginalActionMasked = nullptr;
 RawCoordinateFn gRawX = nullptr;
 RawCoordinateFn gRawY = nullptr;
@@ -149,6 +153,23 @@ bool isTargetProcess() {
     return executablePath() == kSpawnerPath && readSmallFile("/proc/self/cmdline") == kTargetPackage;
 }
 
+void fileLog(const char *message) {
+    static constexpr const char *paths[] = {
+            "/data/user_de/0/com.miui.weather2/cache/miweatherlocation_native.log",
+            "/data/user/0/com.miui.weather2/cache/miweatherlocation_native.log",
+            "/data/data/com.miui.weather2/cache/miweatherlocation_native.log",
+    };
+    for (const char *path : paths) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (fd < 0) continue;
+        size_t length = strnlen(message ? message : "", 1023);
+        (void)write(fd, message ? message : "", length);
+        (void)write(fd, "\n", 1);
+        close(fd);
+        return;
+    }
+}
+
 void logLine(int priority, const char *format, ...) {
     char buffer[1024]{};
     va_list args;
@@ -156,6 +177,7 @@ void logLine(int priority, const char *format, ...) {
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
     __android_log_write(priority, kTag, buffer);
+    fileLog(buffer);
 }
 
 float readDensity() {
@@ -205,10 +227,9 @@ std::string columnString(const SqliteApi &api, sqlite3_stmt *statement, int colu
 std::string stripStarSuffix(std::string value) {
     static constexpr const char *suffixes[] = {" ★", " ☆", "★", "☆"};
     for (const char *suffix : suffixes) {
-        size_t suffixLength = strlen(suffix);
-        if (value.size() >= suffixLength &&
-            value.compare(value.size() - suffixLength, suffixLength, suffix) == 0) {
-            value.erase(value.size() - suffixLength);
+        size_t length = strlen(suffix);
+        if (value.size() >= length && value.compare(value.size() - length, length, suffix) == 0) {
+            value.erase(value.size() - length);
             while (!value.empty() && value.back() == ' ') value.pop_back();
             break;
         }
@@ -232,8 +253,7 @@ bool syncStarText() {
 
     sqlite3 *database = nullptr;
     if (api.openV2(path.c_str(), &database,
-                   SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK ||
-        !database) {
+                   SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK || !database) {
         if (database) api.close(database);
         return false;
     }
@@ -241,8 +261,7 @@ bool syncStarText() {
 
     sqlite3_stmt *query = nullptr;
     const char *querySql =
-            "SELECT rowid,name,street_name FROM selectedcity "
-            "WHERE flag=1 ORDER BY position ASC LIMIT 1";
+            "SELECT rowid,name,street_name FROM selectedcity WHERE flag=1 ORDER BY position ASC LIMIT 1";
     if (api.prepareV2(database, querySql, -1, &query, nullptr) != SQLITE_OK || !query) {
         api.close(database);
         return false;
@@ -259,13 +278,11 @@ bool syncStarText() {
     api.finalize(query);
 
     bool filled = miweatherlocation_runtime_state.star_filled != 0u;
-    const char *star = filled ? "★" : "☆";
     std::string display = name;
     if (!street.empty()) {
         if (!display.empty()) display += " ";
         display += street;
     }
-
     {
         std::lock_guard<std::mutex> lock(gDisplayMutex);
         gDisplayName = display;
@@ -273,7 +290,7 @@ bool syncStarText() {
 
     const bool useStreet = !street.empty();
     const std::string base = useStreet ? street : name;
-    const std::string desired = base.empty() ? std::string(star) : base + " " + star;
+    const std::string desired = base + (filled ? " ★" : " ☆");
     sqlite3_stmt *update = nullptr;
     const char *updateSql = useStreet
             ? "UPDATE selectedcity SET street_name=? WHERE rowid=? AND flag=1"
@@ -288,27 +305,7 @@ bool syncStarText() {
         api.finalize(update);
     }
     api.close(database);
-
-    if (changed) {
-        logLine(ANDROID_LOG_INFO, "star text synced state=%s title=%s",
-                filled ? "FILLED" : "OUTLINE", display.c_str());
-    }
     return changed;
-}
-
-size_t utf8CodePointCount(const std::string &text) {
-    size_t count = 0;
-    for (size_t i = 0; i < text.size();) {
-        unsigned char c = static_cast<unsigned char>(text[i]);
-        size_t step = 1;
-        if ((c & 0xE0u) == 0xC0u) step = 2;
-        else if ((c & 0xF0u) == 0xE0u) step = 3;
-        else if ((c & 0xF8u) == 0xF0u) step = 4;
-        if (i + step > text.size()) step = 1;
-        i += step;
-        ++count;
-    }
-    return count;
 }
 
 float estimateTitleWidthDp(const std::string &text) {
@@ -316,34 +313,39 @@ float estimateTitleWidthDp(const std::string &text) {
     for (size_t i = 0; i < text.size();) {
         unsigned char c = static_cast<unsigned char>(text[i]);
         if (c < 0x80u) {
-            width += (c == ' ') ? 5.0f : 9.0f;
+            width += (c == ' ') ? 4.0f : 8.0f;
             ++i;
         } else {
             size_t step = ((c & 0xE0u) == 0xC0u) ? 2u :
                           ((c & 0xF0u) == 0xE0u) ? 3u : 4u;
             if (i + step > text.size()) step = 1u;
             i += step;
-            width += 17.0f;
+            width += 14.0f;
         }
     }
     return width;
 }
 
-bool isInsideStarHitRegion(float x, float y) {
+bool starHitRegion(float x, float y, float *leftOut = nullptr, float *rightOut = nullptr) {
     std::string display;
     {
         std::lock_guard<std::mutex> lock(gDisplayMutex);
         display = gDisplayName;
     }
-    if (display.empty()) return false;
+    if (display.empty() || gDensity <= 0.0f) return false;
 
-    // HyperOS Weather phone layout: title row begins roughly 24-40dp from the
-    // left and 30-75dp from the top. The hit box deliberately has generous
-    // horizontal padding so different Chinese district/street lengths remain usable.
-    float leftDp = 38.0f + estimateTitleWidthDp(display) + 4.0f;
-    float rightDp = leftDp + 46.0f;
-    float topDp = 26.0f;
-    float bottomDp = 82.0f;
+    // The visible star is appended to the current-location title. Different HyperOS
+    // font metrics make exact text measurement unavailable from native code, so use
+    // a deliberately padded region around the estimated title end. This is still
+    // narrow enough to avoid swallowing the entire title row.
+    float estimatedEndDp = 24.0f + estimateTitleWidthDp(display);
+    float leftDp = std::fmax(92.0f, estimatedEndDp - 34.0f);
+    float rightDp = std::fmin(350.0f, estimatedEndDp + 70.0f);
+    float topDp = 18.0f;
+    float bottomDp = 112.0f;
+    if (leftOut) *leftOut = leftDp;
+    if (rightOut) *rightOut = rightDp;
+
     float dpX = x / gDensity;
     float dpY = y / gDensity;
     return dpX >= leftDp && dpX <= rightDp && dpY >= topDp && dpY <= bottomDp;
@@ -355,7 +357,10 @@ void toggleAsync() {
     std::thread([] {
         int result = miweatherlocation_toggle_current_favorite();
         logLine(result > 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
-                "star tap toggle result=%d", result);
+                "STAR_TOGGLE result=%d new_state=%s distance=%um",
+                result,
+                miweatherlocation_runtime_state.star_filled ? "FILLED" : "OUTLINE",
+                miweatherlocation_runtime_state.nearest_distance_m);
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         (void)syncStarText();
         gToggleInFlight.store(false);
@@ -371,18 +376,36 @@ int hookedActionMasked(void *event) {
     if (action == kActionDown) {
         float x = gRawX(event, 0);
         float y = gRawY(event, 0);
-        gTouch.downInStar = isInsideStarHitRegion(x, y);
+        float left = 0.0f;
+        float right = 0.0f;
+        bool hit = starHitRegion(x, y, &left, &right);
+        gTouch.downInStar = hit;
         gTouch.downX = x;
         gTouch.downY = y;
+        uint32_t count = gTouchDownCount.fetch_add(1) + 1u;
+        if (hit || (y / gDensity) < 130.0f) {
+            logLine(ANDROID_LOG_INFO,
+                    "TOUCH_DOWN #%u raw=(%.1f,%.1f) dp=(%.1f,%.1f) hit=%d regionX=%.1f..%.1f",
+                    count, x, y, x / gDensity, y / gDensity, hit ? 1 : 0, left, right);
+        }
     } else if (action == kActionUp) {
         float x = gRawX(event, 0);
         float y = gRawY(event, 0);
-        bool candidate = gTouch.downInStar && isInsideStarHitRegion(x, y);
+        bool upHit = starHitRegion(x, y);
+        bool candidate = gTouch.downInStar && upHit;
         float dx = x - gTouch.downX;
         float dy = y - gTouch.downY;
         gTouch.downInStar = false;
-        float maxMove = 14.0f * gDensity;
-        if (candidate && (dx * dx + dy * dy) <= maxMove * maxMove) {
+        uint32_t count = gTouchUpCount.fetch_add(1) + 1u;
+        float maxMove = 22.0f * gDensity;
+        bool accepted = candidate && (dx * dx + dy * dy) <= maxMove * maxMove;
+        if (candidate || (y / gDensity) < 130.0f) {
+            logLine(ANDROID_LOG_INFO,
+                    "TOUCH_UP #%u raw=(%.1f,%.1f) candidate=%d accepted=%d move=(%.1f,%.1f)",
+                    count, x, y, candidate ? 1 : 0, accepted ? 1 : 0, dx, dy);
+        }
+        if (accepted) {
+            gHitCount.fetch_add(1);
             toggleAsync();
             return kActionCancel;
         }
@@ -422,16 +445,13 @@ int patchGotCallback(dl_phdr_info *info, size_t, void *data) {
     for (const ElfW(Dyn) *entry = dynamic; entry->d_tag != DT_NULL; ++entry) {
         switch (entry->d_tag) {
             case DT_SYMTAB:
-                symtab = reinterpret_cast<const ElfW(Sym) *>(
-                        relocatedPointer(base, entry->d_un.d_ptr));
+                symtab = reinterpret_cast<const ElfW(Sym) *>(relocatedPointer(base, entry->d_un.d_ptr));
                 break;
             case DT_STRTAB:
-                strtab = reinterpret_cast<const char *>(
-                        relocatedPointer(base, entry->d_un.d_ptr));
+                strtab = reinterpret_cast<const char *>(relocatedPointer(base, entry->d_un.d_ptr));
                 break;
             case DT_JMPREL:
-                rela = reinterpret_cast<const ElfW(Rela) *>(
-                        relocatedPointer(base, entry->d_un.d_ptr));
+                rela = reinterpret_cast<const ElfW(Rela) *>(relocatedPointer(base, entry->d_un.d_ptr));
                 break;
             case DT_PLTRELSZ:
                 relaSize = static_cast<size_t>(entry->d_un.d_val);
@@ -440,7 +460,7 @@ int patchGotCallback(dl_phdr_info *info, size_t, void *data) {
                 break;
         }
     }
-    if (!symtab || !strtab || !rela || !relaSize) return 0;
+    if (!symtab || !strtab || !rela || relaSize == 0) return 0;
 
     size_t count = relaSize / sizeof(ElfW(Rela));
     long pageSize = sysconf(_SC_PAGESIZE);
@@ -454,21 +474,21 @@ int patchGotCallback(dl_phdr_info *info, size_t, void *data) {
         if (!name || strcmp(name, kActionSymbol) != 0) continue;
 
         auto **slot = reinterpret_cast<void **>(base + rel.r_offset);
-        uintptr_t page = reinterpret_cast<uintptr_t>(slot) &
-                         ~static_cast<uintptr_t>(pageSize - 1);
+        uintptr_t page = reinterpret_cast<uintptr_t>(slot) & ~static_cast<uintptr_t>(pageSize - 1);
         if (mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(pageSize),
                      PROT_READ | PROT_WRITE) != 0) {
-            logLine(ANDROID_LOG_ERROR, "mprotect GOT failed errno=%d", errno);
+            logLine(ANDROID_LOG_ERROR, "HOOK_FAIL mprotect errno=%d", errno);
             return 1;
         }
         gOriginalActionMasked = reinterpret_cast<ActionMaskedFn>(*slot);
         __atomic_store_n(slot, reinterpret_cast<void *>(&hookedActionMasked), __ATOMIC_SEQ_CST);
         (void)mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(pageSize), PROT_READ);
         context->patched = true;
-        logLine(ANDROID_LOG_INFO, "installed Weather MotionEvent star tap hook original=%p",
+        logLine(ANDROID_LOG_INFO, "HOOK_OK symbol=%s original=%p", kActionSymbol,
                 reinterpret_cast<void *>(gOriginalActionMasked));
         return 1;
     }
+    logLine(ANDROID_LOG_WARN, "HOOK_FAIL symbol_not_found_in_plt");
     return 0;
 }
 
@@ -476,7 +496,11 @@ bool installInputHook() {
     if (gHookInstalled.load()) return true;
     gRawX = reinterpret_cast<RawCoordinateFn>(dlsym(RTLD_DEFAULT, kRawXSymbol));
     gRawY = reinterpret_cast<RawCoordinateFn>(dlsym(RTLD_DEFAULT, kRawYSymbol));
-    if (!gRawX || !gRawY) return false;
+    if (!gRawX || !gRawY) {
+        logLine(ANDROID_LOG_WARN, "HOOK_WAIT rawX=%p rawY=%p",
+                reinterpret_cast<void *>(gRawX), reinterpret_cast<void *>(gRawY));
+        return false;
+    }
     GotPatchContext context;
     dl_iterate_phdr(patchGotCallback, &context);
     if (context.patched) gHookInstalled.store(true);
@@ -486,14 +510,12 @@ bool installInputHook() {
 void starWorker() {
     if (!isTargetProcess()) return;
     gDensity = readDensity();
-    logLine(ANDROID_LOG_INFO, "star worker started density=%.3f", gDensity);
+    logLine(ANDROID_LOG_INFO, "STAR_WORKER_START density=%.3f", gDensity);
 
     for (int i = 0; i < 240 && isTargetProcess(); ++i) {
         (void)syncStarText();
         if (!gHookInstalled.load()) (void)installInputHook();
-        if (gHookInstalled.load() && miweatherlocation_runtime_state.current_location_found != 0u) {
-            break;
-        }
+        if (gHookInstalled.load() && miweatherlocation_runtime_state.current_location_found != 0u) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 
