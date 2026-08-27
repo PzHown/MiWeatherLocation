@@ -15,6 +15,8 @@ target_compile_options(miweatherlocation PRIVATE
     -Wall
     -Wextra
     -Werror=return-type
+    -include
+    cstdarg
     -fvisibility=hidden
     -fvisibility-inlines-hidden
 )
