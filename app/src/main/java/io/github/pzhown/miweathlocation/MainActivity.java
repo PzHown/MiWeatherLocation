@@ -37,7 +37,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); int p = dp(16); root.setPadding(p,p,p,p);
         TextView title = new TextView(this); title.setText("MiWeatherLocation"); title.setTextSize(22f); root.addView(title);
-        TextView hint = new TextView(this); hint.setText("0.7 使用支持 HYOS-spawner 的 LSPosed 直接注入 APK 内 native_init。Scope 只需要小米天气；不需要额外 Magisk/Zygisk 模块。目标：保留真实当前位置，并把广州塔作为第一个收藏城市。"); hint.setPadding(0,dp(8),0,dp(12)); root.addView(hint);
+        TextView hint = new TextView(this); hint.setText("0.8.2 使用支持 HYOS-spawner 的 LSPosed。当前定位星标改为独立 Native 按钮，不再修改天气的 name/street_name；2 km 内存在收藏时显示实心星，否则显示空心星。"); hint.setPadding(0,dp(8),0,dp(12)); root.addView(hint);
         LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
         Button openWeather = new Button(this); openWeather.setText("打开小米天气"); openWeather.setOnClickListener(v -> openWeather()); row.addView(openWeather,new LinearLayout.LayoutParams(0,LinearLayout.LayoutParams.WRAP_CONTENT,1f));
         Button refresh = new Button(this); refresh.setText("刷新状态"); refresh.setOnClickListener(v -> refreshDiagnostics()); row.addView(refresh,new LinearLayout.LayoutParams(0,LinearLayout.LayoutParams.WRAP_CONTENT,1f)); root.addView(row);
@@ -53,7 +53,10 @@ public final class MainActivity extends Activity {
 
     private void refreshDiagnostics() {
         StringBuilder sb = new StringBuilder(); int moduleUid = Process.myUid(); int userId = moduleUid / PER_USER_RANGE;
-        sb.append("App version: 0.7.0-lsposed-hyos-alpha\nArchitecture: LSPosed HYOS-spawner native_init -> Weather child\nSeparate Magisk/Zygisk module required: false\nRoot required for module function: false\nRoot used by this UI only for diagnostics / old-proxy cleanup\n16 KB ELF alignment: enabled\n");
+        sb.append("App version: ").append(BuildConfig.VERSION_NAME).append('\n');
+        sb.append("Architecture: LSPosed HYOS-spawner native_init -> Weather child\n");
+        sb.append("Star UI: independent Native GL button; does not modify city title text\n");
+        sb.append("Favorite radius: 2000m\nSeparate Magisk/Zygisk module required: false\nRoot required for module function: false\nRoot used by this UI only for diagnostics / old-proxy cleanup\n16 KB ELF alignment: enabled\n");
         sb.append("Android: ").append(Build.VERSION.RELEASE).append(" (SDK ").append(Build.VERSION.SDK_INT).append(")\nCurrent userId: ").append(userId).append("\nModule uid: ").append(moduleUid).append("\n\n");
         appendPackageInfo(sb); appendPackagingInfo(sb); appendLegacySiblingInfo(sb); sb.append('\n');
         XposedService service = App.getService();
@@ -65,7 +68,7 @@ public final class MainActivity extends Activity {
             if (service.getApiVersion() >= 102) {
                 var targets = service.getRunningTargets(); sb.append("Modern Running targets count: ").append(targets.size()).append('\n');
                 for (var target : targets) sb.append(" - ").append(target.getProcessName()).append(" pid=").append(target.getPid()).append(" uid=").append(target.getUid()).append(" state=").append(target.getState()).append('\n');
-                sb.append("RunningTargets note: HYOS native targets may not appear here; maps/native state are authoritative.\n");
+                sb.append("RunningTargets note: HYOS native targets may not appear here; functional/native logs are authoritative.\n");
             }
         } catch (Throwable t) { sb.append("LSPosed service diagnostic error: ").append(t).append('\n'); }
         sb.append('\n').append(probeText).append('\n').append(cleanupText); output.setText(sb.toString());
@@ -104,15 +107,16 @@ public final class MainActivity extends Activity {
                 + "pid=$(ps -A 2>/dev/null | awk '$NF ~ /^com\\.miui\\.weather2(:|$)/ {print $2; exit}')\n"
                 + "echo weather_pid=${pid:-none}\n"
                 + "if [ -n \"$pid\" ]; then echo -n 'weather_exe='; readlink /proc/$pid/exe 2>/dev/null || true; fi\n"
-                + "echo '=== LSPosed HYOS native mapping ==='\n"
-                + "if [ -n \"$pid\" ]; then grep -F 'libmiweatherlocation.so' /proc/$pid/maps 2>/dev/null || echo NOT_MAPPED; else echo NO_WEATHER_PROCESS; fi\n"
+                + "echo '=== LSPosed HYOS native mapping (informational) ==='\n"
+                + "if [ -n \"$pid\" ]; then grep -F 'libmiweatherlocation.so' /proc/$pid/maps 2>/dev/null || echo NOT_VISIBLE_IN_MAPS; else echo NO_WEATHER_PROCESS; fi\n"
                 + "echo '=== Weather runtime mapping ==='\n"
                 + "if [ -n \"$pid\" ]; then grep -F 'libweather_app.so' /proc/$pid/maps 2>/dev/null | head -n 8 || true; fi\n"
-                + "echo '=== native logs ==='\n"
-                + "for p in /data/user_de/0/com.miui.weather2/cache/miweatherlocation_native.log /data/user/0/com.miui.weather2/cache/miweatherlocation_native.log; do if [ -f \"$p\" ]; then echo log_path=$p; tail -n 160 \"$p\"; fi; done\n"
-                + "logcat -d -b all 2>/dev/null | grep -E 'MiWeatherLocationNative|native entry initialized in Weather HYOS|favorite injection OK' | tail -n 160 || true\n"
+                + "echo '=== MiWeatherLocation native/star logs ==='\n"
+                + "for p in /data/user_de/0/com.miui.weather2/cache/miweatherlocation_native.log /data/user/0/com.miui.weather2/cache/miweatherlocation_native.log; do if [ -f \"$p\" ]; then echo log_path=$p; tail -n 220 \"$p\"; fi; done\n"
+                + "logcat -d -b all 2>/dev/null | grep -E 'MiWeatherLocationNative|MiWeatherLocationStar|STAR_BUTTON|LEGACY_STAR_TEXT_CLEANED' | tail -n 220 || true\n"
                 + "echo '=== result hints ==='\n"
-                + "if [ -n \"$pid\" ] && grep -qF 'libmiweatherlocation.so' /proc/$pid/maps 2>/dev/null; then echo LSPOSED_HYOS_MAPPING=PASS; else echo LSPOSED_HYOS_MAPPING=FAIL; fi\n"
+                + "echo MAPS_RESULT_IS_INFORMATIONAL=true\n"
+                + "echo CHECK_FOR=STAR_BUTTON_INPUT_HOOK_OK,STAR_BUTTON_RENDER_HOOK_OK,STAR_BUTTON_TOGGLE\n"
                 + "echo '=== old 0.4.x sibling residue ==='\nls -lZ " + shellQuote(oldSibling.getAbsolutePath()) + " 2>/dev/null || echo none\n";
         return runSuScript("HYOS native probe",script);
     }
