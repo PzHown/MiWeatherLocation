@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.pzhown.miweathlocation"
         minSdk = 26
         targetSdk = 37
-        versionCode = 20
-        versionName = "0.8.0-current-favorite-alpha"
+        versionCode = 21
+        versionName = "0.8.1-hyos-star-alpha"
 
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild { cmake { arguments += "-DANDROID_STL=c++_static" } }
