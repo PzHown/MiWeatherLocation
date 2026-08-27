@@ -8,6 +8,9 @@
 #include <sys/system_properties.h>
 #include <unistd.h>
 
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -19,6 +22,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 extern "C" {
 struct MiWeatherLocationRuntimeState {
@@ -59,6 +63,7 @@ constexpr const char *kSpawnerPath = "/system_ext/bin/hyos_spawner";
 constexpr const char *kActionSymbol = "input_MotionEvent_getActionMasked";
 constexpr const char *kRawXSymbol = "input_MotionEvent_getRawX";
 constexpr const char *kRawYSymbol = "input_MotionEvent_getRawY";
+constexpr const char *kSwapSymbol = "eglSwapBuffers";
 constexpr int kActionDown = 0;
 constexpr int kActionUp = 1;
 constexpr int kActionCancel = 3;
@@ -68,6 +73,11 @@ constexpr int SQLITE_ROW = 100;
 constexpr int SQLITE_DONE = 101;
 constexpr int SQLITE_OPEN_READWRITE = 0x00000002;
 constexpr int SQLITE_OPEN_FULLMUTEX = 0x00010000;
+
+constexpr float kStarCenterYDp = 52.0f;
+constexpr float kStarOuterRadiusDp = 9.5f;
+constexpr float kStarHitRadiusDp = 23.0f;
+constexpr float kSwipeThresholdDp = 54.0f;
 
 struct sqlite3;
 struct sqlite3_stmt;
@@ -104,16 +114,18 @@ struct SqliteApi {
 
 using ActionMaskedFn = int (*)(void *event);
 using RawCoordinateFn = float (*)(void *event, int pointerIndex);
+using EglSwapBuffersFn = EGLBoolean (*)(EGLDisplay, EGLSurface);
 
 std::atomic<bool> gThreadStarted{false};
-std::atomic<bool> gHookInstalled{false};
+std::atomic<bool> gInputHookInstalled{false};
+std::atomic<bool> gRenderHookInstalled{false};
 std::atomic<bool> gToggleInFlight{false};
-std::atomic<uint32_t> gTouchDownCount{0};
-std::atomic<uint32_t> gTouchUpCount{0};
+std::atomic<int> gPageIndex{0};
 std::atomic<uint32_t> gHitCount{0};
 ActionMaskedFn gOriginalActionMasked = nullptr;
 RawCoordinateFn gRawX = nullptr;
 RawCoordinateFn gRawY = nullptr;
+EglSwapBuffersFn gOriginalSwapBuffers = nullptr;
 std::mutex gDisplayMutex;
 std::string gDisplayName;
 float gDensity = 3.0f;
@@ -124,6 +136,14 @@ struct TouchState {
     float downY = 0.0f;
 };
 thread_local TouchState gTouch;
+
+struct GlState {
+    EGLContext context = EGL_NO_CONTEXT;
+    GLuint program = 0;
+    GLint position = -1;
+    GLint color = -1;
+};
+GlState gGl;
 
 std::string readSmallFile(const char *path, size_t limit = 256) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -243,7 +263,7 @@ bool bindText(const SqliteApi &api, sqlite3_stmt *statement, int index,
                         reinterpret_cast<void (*)(void *)>(-1)) == SQLITE_OK;
 }
 
-bool syncStarText() {
+bool refreshDisplayStateAndCleanLegacyText() {
     if (!isTargetProcess()) return false;
     (void)miweatherlocation_refresh_current_favorite_state();
 
@@ -273,11 +293,12 @@ bool syncStarText() {
     }
 
     long long rowId = api.columnInt64(query, 0);
-    std::string name = stripStarSuffix(columnString(api, query, 1));
-    std::string street = stripStarSuffix(columnString(api, query, 2));
+    std::string rawName = columnString(api, query, 1);
+    std::string rawStreet = columnString(api, query, 2);
+    std::string name = stripStarSuffix(rawName);
+    std::string street = stripStarSuffix(rawStreet);
     api.finalize(query);
 
-    bool filled = miweatherlocation_runtime_state.star_filled != 0u;
     std::string display = name;
     if (!street.empty()) {
         if (!display.empty()) display += " ";
@@ -288,24 +309,21 @@ bool syncStarText() {
         gDisplayName = display;
     }
 
-    const bool useStreet = !street.empty();
-    const std::string base = useStreet ? street : name;
-    const std::string desired = base + (filled ? " ★" : " ☆");
-    sqlite3_stmt *update = nullptr;
-    const char *updateSql = useStreet
-            ? "UPDATE selectedcity SET street_name=? WHERE rowid=? AND flag=1"
-            : "UPDATE selectedcity SET name=? WHERE rowid=? AND flag=1";
-    bool changed = false;
-    if (api.prepareV2(database, updateSql, -1, &update, nullptr) == SQLITE_OK && update) {
-        if (bindText(api, update, 1, desired) &&
-            api.bindInt64(update, 2, rowId) == SQLITE_OK &&
-            api.step(update) == SQLITE_DONE) {
-            changed = true;
+    if (name != rawName || street != rawStreet) {
+        sqlite3_stmt *update = nullptr;
+        const char *sql = "UPDATE selectedcity SET name=?,street_name=? WHERE rowid=? AND flag=1";
+        if (api.prepareV2(database, sql, -1, &update, nullptr) == SQLITE_OK && update) {
+            if (bindText(api, update, 1, name) && bindText(api, update, 2, street) &&
+                api.bindInt64(update, 3, rowId) == SQLITE_OK && api.step(update) == SQLITE_DONE) {
+                logLine(ANDROID_LOG_INFO,
+                        "LEGACY_STAR_TEXT_CLEANED name=%s street=%s", name.c_str(), street.c_str());
+            }
+            api.finalize(update);
         }
-        api.finalize(update);
     }
+
     api.close(database);
-    return changed;
+    return !display.empty();
 }
 
 float estimateTitleWidthDp(const std::string &text) {
@@ -313,7 +331,7 @@ float estimateTitleWidthDp(const std::string &text) {
     for (size_t i = 0; i < text.size();) {
         unsigned char c = static_cast<unsigned char>(text[i]);
         if (c < 0x80u) {
-            width += (c == ' ') ? 4.0f : 8.0f;
+            width += (c == ' ') ? 4.5f : 8.0f;
             ++i;
         } else {
             size_t step = ((c & 0xE0u) == 0xC0u) ? 2u :
@@ -326,29 +344,28 @@ float estimateTitleWidthDp(const std::string &text) {
     return width;
 }
 
-bool starHitRegion(float x, float y, float *leftOut = nullptr, float *rightOut = nullptr) {
+float starCenterXDp() {
     std::string display;
     {
         std::lock_guard<std::mutex> lock(gDisplayMutex);
         display = gDisplayName;
     }
-    if (display.empty() || gDensity <= 0.0f) return false;
+    float center = 24.0f + estimateTitleWidthDp(display) + 15.0f;
+    if (center < 94.0f) center = 94.0f;
+    if (center > 350.0f) center = 350.0f;
+    return center;
+}
 
-    // The visible star is appended to the current-location title. Different HyperOS
-    // font metrics make exact text measurement unavailable from native code, so use
-    // a deliberately padded region around the estimated title end. This is still
-    // narrow enough to avoid swallowing the entire title row.
-    float estimatedEndDp = 24.0f + estimateTitleWidthDp(display);
-    float leftDp = std::fmax(92.0f, estimatedEndDp - 34.0f);
-    float rightDp = std::fmin(350.0f, estimatedEndDp + 70.0f);
-    float topDp = 18.0f;
-    float bottomDp = 112.0f;
-    if (leftOut) *leftOut = leftDp;
-    if (rightOut) *rightOut = rightDp;
+bool starVisible() {
+    return gPageIndex.load() == 0 &&
+           miweatherlocation_runtime_state.current_location_found != 0u;
+}
 
-    float dpX = x / gDensity;
-    float dpY = y / gDensity;
-    return dpX >= leftDp && dpX <= rightDp && dpY >= topDp && dpY <= bottomDp;
+bool starHit(float rawX, float rawY) {
+    if (!starVisible() || gDensity <= 0.0f) return false;
+    float dx = rawX / gDensity - starCenterXDp();
+    float dy = rawY / gDensity - kStarCenterYDp;
+    return dx * dx + dy * dy <= kStarHitRadiusDp * kStarHitRadiusDp;
 }
 
 void toggleAsync() {
@@ -357,12 +374,10 @@ void toggleAsync() {
     std::thread([] {
         int result = miweatherlocation_toggle_current_favorite();
         logLine(result > 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
-                "STAR_TOGGLE result=%d new_state=%s distance=%um",
+                "STAR_BUTTON_TOGGLE result=%d state=%s nearest=%um",
                 result,
                 miweatherlocation_runtime_state.star_filled ? "FILLED" : "OUTLINE",
                 miweatherlocation_runtime_state.nearest_distance_m);
-        std::this_thread::sleep_for(std::chrono::milliseconds(120));
-        (void)syncStarText();
         gToggleInFlight.store(false);
     }).detach();
 }
@@ -376,36 +391,35 @@ int hookedActionMasked(void *event) {
     if (action == kActionDown) {
         float x = gRawX(event, 0);
         float y = gRawY(event, 0);
-        float left = 0.0f;
-        float right = 0.0f;
-        bool hit = starHitRegion(x, y, &left, &right);
-        gTouch.downInStar = hit;
+        gTouch.downInStar = starHit(x, y);
         gTouch.downX = x;
         gTouch.downY = y;
-        uint32_t count = gTouchDownCount.fetch_add(1) + 1u;
-        if (hit || (y / gDensity) < 130.0f) {
+        if (gTouch.downInStar) {
             logLine(ANDROID_LOG_INFO,
-                    "TOUCH_DOWN #%u raw=(%.1f,%.1f) dp=(%.1f,%.1f) hit=%d regionX=%.1f..%.1f",
-                    count, x, y, x / gDensity, y / gDensity, hit ? 1 : 0, left, right);
+                    "STAR_BUTTON_DOWN raw=(%.1f,%.1f) centerDp=(%.1f,%.1f)",
+                    x, y, starCenterXDp(), kStarCenterYDp);
         }
     } else if (action == kActionUp) {
         float x = gRawX(event, 0);
         float y = gRawY(event, 0);
-        bool upHit = starHitRegion(x, y);
-        bool candidate = gTouch.downInStar && upHit;
         float dx = x - gTouch.downX;
         float dy = y - gTouch.downY;
-        gTouch.downInStar = false;
-        uint32_t count = gTouchUpCount.fetch_add(1) + 1u;
-        float maxMove = 22.0f * gDensity;
-        bool accepted = candidate && (dx * dx + dy * dy) <= maxMove * maxMove;
-        if (candidate || (y / gDensity) < 130.0f) {
-            logLine(ANDROID_LOG_INFO,
-                    "TOUCH_UP #%u raw=(%.1f,%.1f) candidate=%d accepted=%d move=(%.1f,%.1f)",
-                    count, x, y, candidate ? 1 : 0, accepted ? 1 : 0, dx, dy);
+        float threshold = kSwipeThresholdDp * gDensity;
+
+        if (!gTouch.downInStar && std::fabs(dx) > threshold && std::fabs(dx) > std::fabs(dy) * 1.35f) {
+            int page = gPageIndex.load();
+            if (dx < 0.0f) ++page;
+            else if (page > 0) --page;
+            gPageIndex.store(page);
+            logLine(ANDROID_LOG_INFO, "PAGE_GESTURE index=%d dx=%.1f dy=%.1f", page, dx, dy);
         }
+
+        bool accepted = gTouch.downInStar && starHit(x, y) &&
+                        (dx * dx + dy * dy) <= (22.0f * gDensity) * (22.0f * gDensity);
+        gTouch.downInStar = false;
         if (accepted) {
             gHitCount.fetch_add(1);
+            logLine(ANDROID_LOG_INFO, "STAR_BUTTON_UP accepted=1 hits=%u", gHitCount.load());
             toggleAsync();
             return kActionCancel;
         }
@@ -415,18 +429,158 @@ int hookedActionMasked(void *event) {
     return action;
 }
 
+GLuint compileShader(GLenum type, const char *source) {
+    GLuint shader = glCreateShader(type);
+    if (!shader) return 0;
+    glShaderSource(shader, 1, &source, nullptr);
+    glCompileShader(shader);
+    GLint ok = GL_FALSE;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        glDeleteShader(shader);
+        return 0;
+    }
+    return shader;
+}
+
+bool ensureGlProgram() {
+    EGLContext context = eglGetCurrentContext();
+    if (context == EGL_NO_CONTEXT) return false;
+    if (gGl.context == context && gGl.program != 0) return true;
+
+    if (gGl.program != 0) glDeleteProgram(gGl.program);
+    gGl = {};
+    gGl.context = context;
+
+    static constexpr const char *vertexSource =
+            "attribute vec2 aPos;"
+            "void main(){gl_Position=vec4(aPos,0.0,1.0);}";
+    static constexpr const char *fragmentSource =
+            "precision mediump float;"
+            "uniform vec4 uColor;"
+            "void main(){gl_FragColor=uColor;}";
+
+    GLuint vs = compileShader(GL_VERTEX_SHADER, vertexSource);
+    GLuint fs = compileShader(GL_FRAGMENT_SHADER, fragmentSource);
+    if (!vs || !fs) {
+        if (vs) glDeleteShader(vs);
+        if (fs) glDeleteShader(fs);
+        return false;
+    }
+
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    GLint ok = GL_FALSE;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok != GL_TRUE) {
+        glDeleteProgram(program);
+        return false;
+    }
+
+    gGl.program = program;
+    gGl.position = glGetAttribLocation(program, "aPos");
+    gGl.color = glGetUniformLocation(program, "uColor");
+    logLine(ANDROID_LOG_INFO, "STAR_RENDER_GL_READY program=%u", program);
+    return gGl.position >= 0 && gGl.color >= 0;
+}
+
+void appendStarPoint(std::vector<GLfloat> &points, float centerX, float centerY,
+                     float outerRadius, int index, int viewportWidth, int viewportHeight) {
+    constexpr float kPi = 3.14159265358979323846f;
+    float angle = -kPi / 2.0f + static_cast<float>(index) * kPi / 5.0f;
+    float radius = (index % 2 == 0) ? outerRadius : outerRadius * 0.44f;
+    float px = centerX + std::cos(angle) * radius;
+    float pyTop = centerY + std::sin(angle) * radius;
+    float x = px / static_cast<float>(viewportWidth) * 2.0f - 1.0f;
+    float y = 1.0f - pyTop / static_cast<float>(viewportHeight) * 2.0f;
+    points.push_back(x);
+    points.push_back(y);
+}
+
+void drawIndependentStarButton() {
+    if (!starVisible() || !ensureGlProgram()) return;
+
+    GLint viewport[4]{};
+    GLint previousProgram = 0;
+    GLint previousArrayBuffer = 0;
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &previousProgram);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &previousArrayBuffer);
+    if (viewport[2] <= 0 || viewport[3] <= 0) return;
+
+    GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+    GLboolean depthWasEnabled = glIsEnabled(GL_DEPTH_TEST);
+    GLboolean scissorWasEnabled = glIsEnabled(GL_SCISSOR_TEST);
+
+    glUseProgram(gGl.program);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glEnableVertexAttribArray(static_cast<GLuint>(gGl.position));
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_SCISSOR_TEST);
+    glUniform4f(gGl.color, 1.0f, 1.0f, 1.0f, 0.94f);
+
+    float centerX = starCenterXDp() * gDensity;
+    float centerY = kStarCenterYDp * gDensity;
+    float radius = kStarOuterRadiusDp * gDensity;
+    bool filled = miweatherlocation_runtime_state.star_filled != 0u;
+
+    std::vector<GLfloat> outline;
+    outline.reserve(20);
+    for (int i = 0; i < 10; ++i) {
+        appendStarPoint(outline, centerX, centerY, radius, i, viewport[2], viewport[3]);
+    }
+
+    if (filled) {
+        std::vector<GLfloat> fan;
+        fan.reserve(24);
+        fan.push_back(centerX / viewport[2] * 2.0f - 1.0f);
+        fan.push_back(1.0f - centerY / viewport[3] * 2.0f);
+        for (int i = 0; i <= 10; ++i) {
+            int point = i % 10;
+            appendStarPoint(fan, centerX, centerY, radius, point, viewport[2], viewport[3]);
+        }
+        glVertexAttribPointer(static_cast<GLuint>(gGl.position), 2, GL_FLOAT, GL_FALSE, 0, fan.data());
+        glDrawArrays(GL_TRIANGLE_FAN, 0, static_cast<GLsizei>(fan.size() / 2));
+    } else {
+        glVertexAttribPointer(static_cast<GLuint>(gGl.position), 2, GL_FLOAT, GL_FALSE, 0, outline.data());
+        glLineWidth(2.0f);
+        glDrawArrays(GL_LINE_LOOP, 0, 10);
+    }
+
+    glDisableVertexAttribArray(static_cast<GLuint>(gGl.position));
+    glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(previousArrayBuffer));
+    glUseProgram(static_cast<GLuint>(previousProgram));
+    if (!blendWasEnabled) glDisable(GL_BLEND);
+    if (depthWasEnabled) glEnable(GL_DEPTH_TEST);
+    if (scissorWasEnabled) glEnable(GL_SCISSOR_TEST);
+}
+
+EGLBoolean hookedSwapBuffers(EGLDisplay display, EGLSurface surface) {
+    drawIndependentStarButton();
+    return gOriginalSwapBuffers ? gOriginalSwapBuffers(display, surface) : EGL_FALSE;
+}
+
 uintptr_t relocatedPointer(uintptr_t base, ElfW(Addr) pointer) {
     uintptr_t value = static_cast<uintptr_t>(pointer);
     return value < base ? base + value : value;
 }
 
-struct GotPatchContext {
+struct PatchRequest {
+    const char *libraryNeedle;
+    const char *symbol;
+    void *replacement;
     bool patched = false;
 };
 
 int patchGotCallback(dl_phdr_info *info, size_t, void *data) {
-    auto *context = static_cast<GotPatchContext *>(data);
-    if (!info || !info->dlpi_name || !strstr(info->dlpi_name, "libweather_app.so")) return 0;
+    auto *request = static_cast<PatchRequest *>(data);
+    if (!info || !info->dlpi_name || !strstr(info->dlpi_name, request->libraryNeedle)) return 0;
 
     uintptr_t base = static_cast<uintptr_t>(info->dlpi_addr);
     const ElfW(Dyn) *dynamic = nullptr;
@@ -462,71 +616,94 @@ int patchGotCallback(dl_phdr_info *info, size_t, void *data) {
     }
     if (!symtab || !strtab || !rela || relaSize == 0) return 0;
 
-    size_t count = relaSize / sizeof(ElfW(Rela));
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) pageSize = 4096;
+    size_t count = relaSize / sizeof(ElfW(Rela));
     for (size_t i = 0; i < count; ++i) {
         const ElfW(Rela) &rel = rela[i];
         uint32_t type = static_cast<uint32_t>(ELF64_R_TYPE(rel.r_info));
         if (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT) continue;
         size_t symbolIndex = static_cast<size_t>(ELF64_R_SYM(rel.r_info));
         const char *name = strtab + symtab[symbolIndex].st_name;
-        if (!name || strcmp(name, kActionSymbol) != 0) continue;
+        if (!name || strcmp(name, request->symbol) != 0) continue;
 
         auto **slot = reinterpret_cast<void **>(base + rel.r_offset);
         uintptr_t page = reinterpret_cast<uintptr_t>(slot) & ~static_cast<uintptr_t>(pageSize - 1);
         if (mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(pageSize),
                      PROT_READ | PROT_WRITE) != 0) {
-            logLine(ANDROID_LOG_ERROR, "HOOK_FAIL mprotect errno=%d", errno);
             return 1;
         }
-        gOriginalActionMasked = reinterpret_cast<ActionMaskedFn>(*slot);
-        __atomic_store_n(slot, reinterpret_cast<void *>(&hookedActionMasked), __ATOMIC_SEQ_CST);
+        __atomic_store_n(slot, request->replacement, __ATOMIC_SEQ_CST);
         (void)mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(pageSize), PROT_READ);
-        context->patched = true;
-        logLine(ANDROID_LOG_INFO, "HOOK_OK symbol=%s original=%p", kActionSymbol,
-                reinterpret_cast<void *>(gOriginalActionMasked));
+        request->patched = true;
         return 1;
     }
-    logLine(ANDROID_LOG_WARN, "HOOK_FAIL symbol_not_found_in_plt");
     return 0;
 }
 
+bool patchGot(const char *libraryNeedle, const char *symbol, void *replacement) {
+    PatchRequest request{libraryNeedle, symbol, replacement, false};
+    dl_iterate_phdr(patchGotCallback, &request);
+    return request.patched;
+}
+
 bool installInputHook() {
-    if (gHookInstalled.load()) return true;
+    if (gInputHookInstalled.load()) return true;
+    gOriginalActionMasked = reinterpret_cast<ActionMaskedFn>(dlsym(RTLD_DEFAULT, kActionSymbol));
     gRawX = reinterpret_cast<RawCoordinateFn>(dlsym(RTLD_DEFAULT, kRawXSymbol));
     gRawY = reinterpret_cast<RawCoordinateFn>(dlsym(RTLD_DEFAULT, kRawYSymbol));
-    if (!gRawX || !gRawY) {
-        logLine(ANDROID_LOG_WARN, "HOOK_WAIT rawX=%p rawY=%p",
-                reinterpret_cast<void *>(gRawX), reinterpret_cast<void *>(gRawY));
-        return false;
+    if (!gOriginalActionMasked || !gRawX || !gRawY) return false;
+    bool patched = patchGot("libweather_app.so", kActionSymbol,
+                            reinterpret_cast<void *>(&hookedActionMasked));
+    if (patched) {
+        gInputHookInstalled.store(true);
+        logLine(ANDROID_LOG_INFO, "STAR_BUTTON_INPUT_HOOK_OK");
     }
-    GotPatchContext context;
-    dl_iterate_phdr(patchGotCallback, &context);
-    if (context.patched) gHookInstalled.store(true);
-    return context.patched;
+    return patched;
+}
+
+bool installRenderHook() {
+    if (gRenderHookInstalled.load()) return true;
+    void *egl = dlopen("libEGL.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!egl) egl = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+    gOriginalSwapBuffers = egl
+            ? reinterpret_cast<EglSwapBuffersFn>(dlsym(egl, kSwapSymbol))
+            : reinterpret_cast<EglSwapBuffersFn>(dlsym(RTLD_DEFAULT, kSwapSymbol));
+    if (!gOriginalSwapBuffers) return false;
+    bool patched = patchGot("libhyper_os_flutter.so", kSwapSymbol,
+                            reinterpret_cast<void *>(&hookedSwapBuffers));
+    if (patched) {
+        gRenderHookInstalled.store(true);
+        logLine(ANDROID_LOG_INFO, "STAR_BUTTON_RENDER_HOOK_OK");
+    }
+    return patched;
 }
 
 void starWorker() {
     if (!isTargetProcess()) return;
     gDensity = readDensity();
-    logLine(ANDROID_LOG_INFO, "STAR_WORKER_START density=%.3f", gDensity);
+    logLine(ANDROID_LOG_INFO, "STAR_BUTTON_WORKER_START density=%.3f", gDensity);
 
     for (int i = 0; i < 240 && isTargetProcess(); ++i) {
-        (void)syncStarText();
-        if (!gHookInstalled.load()) (void)installInputHook();
-        if (gHookInstalled.load() && miweatherlocation_runtime_state.current_location_found != 0u) break;
+        (void)refreshDisplayStateAndCleanLegacyText();
+        if (!gInputHookInstalled.load()) (void)installInputHook();
+        if (!gRenderHookInstalled.load()) (void)installRenderHook();
+        if (gInputHookInstalled.load() && gRenderHookInstalled.load() &&
+            miweatherlocation_runtime_state.current_location_found != 0u) {
+            break;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
 
     while (isTargetProcess()) {
-        (void)syncStarText();
-        if (!gHookInstalled.load()) (void)installInputHook();
+        (void)refreshDisplayStateAndCleanLegacyText();
+        if (!gInputHookInstalled.load()) (void)installInputHook();
+        if (!gRenderHookInstalled.load()) (void)installRenderHook();
         std::this_thread::sleep_for(std::chrono::milliseconds(1200));
     }
 }
 
-__attribute__((constructor)) void startStarUiPrototype() {
+__attribute__((constructor)) void startStarUi() {
     if (!isTargetProcess()) return;
     bool expected = false;
     if (!gThreadStarted.compare_exchange_strong(expected, true)) return;
