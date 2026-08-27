@@ -7,6 +7,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_library(miweatherlocation SHARED
     src/main.cpp
+    src/star_ui.cpp
 )
 
 target_include_directories(miweatherlocation PRIVATE include)
